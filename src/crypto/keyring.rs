@@ -14,13 +14,15 @@
 
 use std::collections::HashMap;
 
-use aws_lc_rs::{signature as aws_lc_rs_signature, signature::UnparsedPublicKey};
 use const_oid::db::rfc5912::{ID_EC_PUBLIC_KEY, RSA_ENCRYPTION, SECP_256_R_1};
 use digest::Digest;
+use ecdsa::VerifyingKey;
+use p256::NistP256;
+use signature::DigestVerifier;
 use thiserror::Error;
 use x509_cert::{
     der,
-    der::{Decode, Encode},
+    der::{referenced::OwnedToRef, Decode, Encode},
     spki::SubjectPublicKeyInfoOwned,
 };
 
@@ -40,7 +42,7 @@ type Result<T> = std::result::Result<T, KeyringError>;
 
 /// A CT signing key.
 struct Key {
-    inner: UnparsedPublicKey<Vec<u8>>,
+    inner: VerifyingKey<NistP256>,
     /// The key's RFC 6962-style "key ID".
     /// <https://datatracker.ietf.org/doc/html/rfc6962#section-3.2>
     fingerprint: [u8; 32],
@@ -64,17 +66,23 @@ impl Key {
 
         match (algo, params) {
             // TODO(tnytown): should we also accept ed25519, p384, ... ?
-            (ID_EC_PUBLIC_KEY, SECP_256_R_1) => Ok(Key {
-                inner: UnparsedPublicKey::new(
-                    &aws_lc_rs_signature::ECDSA_P256_SHA256_ASN1,
-                    spki.subject_public_key.raw_bytes().to_owned(),
-                ),
-                fingerprint: {
-                    let mut hasher = sha2::Sha256::new();
-                    spki.encode(&mut hasher).expect("failed to hash key!");
-                    hasher.finalize().into()
-                },
-            }),
+            (ID_EC_PUBLIC_KEY, SECP_256_R_1) => {
+                // Parse the ECDSA P256 verifying key from the SPKI using owned_to_ref
+                let verifying_key = VerifyingKey::<NistP256>::try_from(spki.owned_to_ref())
+                    .map_err(|_| KeyringError::KeyMalformed(der::Error::new(
+                        der::ErrorKind::Failed,
+                        der::Length::ZERO,
+                    )))?;
+
+                Ok(Key {
+                    inner: verifying_key,
+                    fingerprint: {
+                        let mut hasher = sha2::Sha256::new();
+                        spki.encode(&mut hasher).expect("failed to hash key!");
+                        hasher.finalize().into()
+                    },
+                })
+            }
             _ => Err(KeyringError::AlgoUnsupported),
         }
     }
@@ -99,9 +107,18 @@ impl Keyring {
     pub fn verify(&self, key_id: &[u8; 32], signature: &[u8], data: &[u8]) -> Result<()> {
         let key = self.0.get(key_id).ok_or(KeyringError::KeyNotFound)?;
 
+        // Hash the data with SHA-256
+        let mut hasher = sha2::Sha256::new();
+        digest::Digest::update(&mut hasher, data);
+
+        // Parse the DER-encoded signature
+        let sig = ecdsa::Signature::from_der(signature)
+            .map_err(|_| KeyringError::VerificationFailed)?;
+
+        // Verify using the digest verifier
         key.inner
-            .verify(data, signature)
-            .or(Err(KeyringError::VerificationFailed))?;
+            .verify_digest(hasher, &sig)
+            .map_err(|_| KeyringError::VerificationFailed)?;
 
         Ok(())
     }
