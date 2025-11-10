@@ -22,7 +22,6 @@
 //! to enable Fulcio and Rekor integrations.
 use std::{collections::BTreeMap, path::Path};
 
-use futures_util::TryStreamExt;
 use pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
 use sigstore_protobuf_specs::dev::sigstore::{
@@ -30,7 +29,7 @@ use sigstore_protobuf_specs::dev::sigstore::{
     trustroot::v1::{CertificateAuthority, TransparencyLogInstance, TrustedRoot},
 };
 use tokio_util::bytes::BytesMut;
-use tough::TargetName;
+use tough::{IntoVec, TargetName};
 use tracing::debug;
 
 mod constants;
@@ -103,7 +102,10 @@ impl SigstoreTrustRoot {
 
         let read_remote_target = || async {
             match repository.read_target(&name).await {
-                Ok(Some(s)) => Ok(s.try_collect::<BytesMut>().await.map_err(Box::new)?),
+                Ok(Some(s)) => {
+                    let vec = s.into_vec().await.map_err(Box::new)?;
+                    Ok(BytesMut::from(vec.as_slice()))
+                }
                 _ => Err(SigstoreError::TufTargetNotFoundError(name.raw().to_owned())),
             }
         };

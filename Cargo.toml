@@ -16,7 +16,7 @@ default = ["full", "native-tls"]
 
 bundle = ["sign", "verify"]
 cached-client = ["dep:cached"]
-cert = ["dep:aws-lc-rs", "rustls-webpki/aws-lc-rs"]
+cert = ["dep:aws-lc-rs"]
 cosign = [
     "cert",
     "dep:async-trait",
@@ -68,8 +68,6 @@ sign = [
     "rekor",
 ]
 sigstore-trust-root = [
-    "dep:futures",
-    "dep:futures-util",
     "dep:hex",
     "dep:reqwest",
     "dep:sigstore_protobuf_specs",
@@ -85,7 +83,7 @@ verify = [
     "fulcio",
     "rekor",
 ]
-wasm = ["chrono/wasmbind", "getrandom/js"]
+wasm = ["chrono/wasmbind"]
 
 [dependencies]
 async-trait = { version = "0.1", optional = true, default-features = false }
@@ -120,9 +118,6 @@ elliptic-curve = { version = "0.13", default-features = false, features = [
     "pem",
     "std",
 ] }
-futures = { version = "0.3", default-features = false, optional = true }
-futures-util = { version = "0.3", default-features = false, optional = true }
-getrandom = { version = "0.2", default-features = false, optional = true }
 hex = { version = "0.4", default-features = false, optional = true, features = [
     "std",
 ] }
