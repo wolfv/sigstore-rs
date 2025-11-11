@@ -22,6 +22,8 @@ use aws_lc_rs::signature::{RsaKeyPair, KeyPair as AwsKeyPair};
 use aws_lc_rs::encoding::AsDer;
 use aws_lc_rs::rsa::KeySize;
 use zeroize::Zeroizing;
+use x509_cert::der::{Decode, Encode};
+use x509_cert::spki::SubjectPublicKeyInfoOwned;
 
 use crate::{
     crypto::{CosignVerificationKey, SigStoreSigner, SigningScheme},
@@ -62,10 +64,25 @@ impl RSAKeys {
             .as_ref()
             .to_vec();
 
-        // Parse to get public key
-        let key_pair = RsaKeyPair::from_pkcs8(&pkcs8_der)
-            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to parse generated RSA key: {}", e)))?;
-        let public_key_der = key_pair.public_key().as_ref().to_vec();
+        // Extract the SPKI-encoded public key from the PKCS#8 private key
+        let pkcs8_info = pkcs8::PrivateKeyInfo::from_der(&pkcs8_der)
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to parse PKCS#8: {}", e)))?;
+        let public_key_bytes = pkcs8_info.public_key
+            .ok_or_else(|| SigstoreError::PKCS8Error("No public key in PKCS#8".to_string()))?;
+
+        // Construct SPKI from algorithm and public key
+        use x509_cert::der::referenced::OwnedToRef;
+        let algorithm = x509_cert::spki::AlgorithmIdentifierOwned {
+            oid: pkcs8_info.algorithm.oid,
+            parameters: pkcs8_info.algorithm.parameters.map(|p| p.to_owned().into()),
+        };
+        let spki = SubjectPublicKeyInfoOwned {
+            algorithm,
+            subject_public_key: x509_cert::der::asn1::BitString::from_bytes(public_key_bytes)
+                .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to create BitString: {}", e)))?,
+        };
+        let public_key_der = spki.to_der()
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to encode SPKI: {}", e)))?;
 
         Ok(Self {
             pkcs8_der: Zeroizing::new(pkcs8_der),
@@ -118,12 +135,30 @@ impl RSAKeys {
     /// Builds an `RSAKeys` from a pkcs8 DER-encoded private key.
     pub fn from_der(der_bytes: &[u8]) -> Result<Self> {
         // Verify the key can be parsed
-        let key_pair = RsaKeyPair::from_pkcs8(der_bytes)
+        let _key_pair = RsaKeyPair::from_pkcs8(der_bytes)
             .map_err(|e| SigstoreError::PKCS8Error(format!(
                 "Convert from pkcs8 der to rsa private key failed: {}", e
             )))?;
 
-        let public_key_der = key_pair.public_key().as_ref().to_vec();
+        // Extract the SPKI-encoded public key from the PKCS#8 private key
+        let pkcs8_info = pkcs8::PrivateKeyInfo::from_der(der_bytes)
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to parse PKCS#8: {}", e)))?;
+        let public_key_bytes = pkcs8_info.public_key
+            .ok_or_else(|| SigstoreError::PKCS8Error("No public key in PKCS#8".to_string()))?;
+
+        // Construct SPKI from algorithm and public key
+        use x509_cert::der::referenced::OwnedToRef;
+        let algorithm = x509_cert::spki::AlgorithmIdentifierOwned {
+            oid: pkcs8_info.algorithm.oid,
+            parameters: pkcs8_info.algorithm.parameters.map(|p| p.to_owned().into()),
+        };
+        let spki = SubjectPublicKeyInfoOwned {
+            algorithm,
+            subject_public_key: x509_cert::der::asn1::BitString::from_bytes(public_key_bytes)
+                .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to create BitString: {}", e)))?,
+        };
+        let public_key_der = spki.to_der()
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to encode SPKI: {}", e)))?;
 
         Ok(Self {
             pkcs8_der: Zeroizing::new(der_bytes.to_vec()),

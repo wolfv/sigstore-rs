@@ -310,11 +310,9 @@ mod tests {
     use super::{CertificateEmbeddedSCT, verify_sct};
     use crate::crypto::keyring::Keyring;
     use crate::fulcio::SigningCertificateDetachedSCT;
-    use p256::ecdsa::VerifyingKey;
-    use std::str::FromStr;
     use x509_cert::Certificate;
-    use x509_cert::der::DecodePem;
-    use x509_cert::spki::EncodePublicKey;
+    use x509_cert::der::{DecodePem, Encode};
+    use x509_cert::spki::SubjectPublicKeyInfoOwned;
 
     #[test]
     fn verify_embedded_sct() {
@@ -374,8 +372,9 @@ AaYalIJmBZ8yyezPjTqhxrKBpMnaocVtLJBI1eM3uXnQzQGAJdJ4gs9Fyw==
         let cert = Certificate::from_pem(cert_pem).unwrap();
         let chain = chain_pem.map(|c| Certificate::from_pem(c).unwrap());
         let sct = CertificateEmbeddedSCT::new(&cert, &chain).unwrap();
-        let ctfe_key: VerifyingKey = VerifyingKey::from_str(ctfe_pem).unwrap();
-        let keyring = Keyring::new([ctfe_key.to_public_key_der().unwrap().as_bytes()]).unwrap();
+        let ctfe_key = SubjectPublicKeyInfoOwned::from_pem(ctfe_pem).unwrap();
+        let ctfe_key_der = ctfe_key.to_der().unwrap();
+        let keyring = Keyring::new([ctfe_key_der.as_slice()]).unwrap();
 
         assert!(verify_sct(&sct, &keyring).is_ok());
     }
@@ -390,8 +389,9 @@ mnuk5d670MTXR3p+LIAcxd5MhqIHpLmyYJ5mDKLEoZ/pC0nPuje3JueBcA==
 -----END PUBLIC KEY-----"#;
 
         let sct: SigningCertificateDetachedSCT = serde_json::from_str(sct_json).unwrap();
-        let ctfe_key: VerifyingKey = VerifyingKey::from_str(ctfe_pem).unwrap();
-        let keyring = Keyring::new([ctfe_key.to_public_key_der().unwrap().as_bytes()]).unwrap();
+        let ctfe_key = SubjectPublicKeyInfoOwned::from_pem(ctfe_pem).unwrap();
+        let ctfe_key_der = ctfe_key.to_der().unwrap();
+        let keyring = Keyring::new([ctfe_key_der.as_slice()]).unwrap();
 
         assert!(verify_sct(&sct, &keyring).is_ok());
     }
