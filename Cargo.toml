@@ -16,7 +16,7 @@ default = ["full", "native-tls"]
 
 bundle = ["sign", "verify"]
 cached-client = ["dep:cached"]
-cert = ["dep:aws-lc-rs", "rustls-webpki/aws-lc-rs"]
+cert = ["rustls-webpki/aws-lc-rs"]
 cosign = [
     "cert",
     "dep:async-trait",
@@ -102,24 +102,6 @@ crypto_secretbox = { version = "0.1", default-features = false, features = [
     "salsa20",
 ] }
 digest = { version = "0.10", default-features = false }
-ecdsa = { version = "0.16", default-features = false, features = [
-    "der",
-    "digest",
-    "pkcs8",
-    "signing",
-    "std",
-] }
-ed25519 = { version = "2.2", default-features = false, features = ["alloc"] }
-ed25519-dalek = { version = "2.1", default-features = false, features = [
-    "alloc",
-    "pkcs8",
-    "rand_core",
-] }
-elliptic-curve = { version = "0.13", default-features = false, features = [
-    "arithmetic",
-    "pem",
-    "std",
-] }
 futures = { version = "0.3", default-features = false, optional = true }
 futures-util = { version = "0.3", default-features = false, optional = true }
 getrandom = { version = "0.2", default-features = false, optional = true }
@@ -136,26 +118,7 @@ openidconnect = { version = "4.0", default-features = false, features = [
     "reqwest",
     "reqwest-blocking",
 ], optional = true }
-p256 = { version = "0.13", default-features = false, features = [
-    "arithmetic",
-    "ecdsa",
-    "pem",
-    "std",
-] }
-p384 = { version = "0.13", default-features = false, features = [
-    "arithmetic",
-    "ecdsa",
-    "pem",
-    "std",
-] }
 pem = { version = "3.0", default-features = false, features = ["serde", "std"] }
-pkcs1 = { version = "0.7", default-features = false, features = ["std"] }
-pkcs8 = { version = "0.10", default-features = false, features = [
-    "encryption",
-    "pem",
-    "pkcs5",
-    "std",
-] }
 pki-types = { package = "rustls-pki-types", version = "1.11", default-features = false }
 rand = { version = "0.8", default-features = false, features = [
     "getrandom",
@@ -167,7 +130,6 @@ reqwest = { version = "0.12", default-features = false, features = [
     "multipart",
 ], optional = true }
 ring = { version = "0.17", default-features = false, optional = true }
-rsa = { version = "0.9", default-features = false, features = ["std"] }
 rustls-webpki = { version = "0.103", default-features = false, features = [
     "std",
 ] }
@@ -238,10 +200,10 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 ] }
 
 [target.'cfg(not(target_arch = "powerpc64"))'.dependencies]
-aws-lc-rs = { version = "1", optional = true }
+aws-lc-rs = { version = "1" }
 
 [target.'cfg(target_arch = "powerpc64")'.dependencies]
-aws-lc-rs = { version = "1", optional = true, features = ["bindgen"] }
+aws-lc-rs = { version = "1", features = ["bindgen"] }
 
 # cosign example mappings
 

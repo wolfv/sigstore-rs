@@ -18,72 +18,21 @@
 //! This is a wrapper for [`EcdsaKeys`] and [`EcdsaSigner`]. Because
 //! both [`EcdsaKeys`] and [`EcdsaSigner`] are generic types, they
 //! may let the user to manually include concrete underlying elliptic
-//! curves like `p256`, `p384`, and concrete digest algorithm crates
+//! curves like P-256, P-384, and concrete digest algorithm crates
 //! like `sha2`. To avoid this, we use [`ECDSAKeys`] enum to wrap
 //! the generic type [`EcdsaKeys`].
-//!
-//! # EC Key Pair Operations
-//!
-//! This wrapper provides two underlying elliptic curves, s.t.
-//! * `P256`: `P-256`, also known as `secp256r1` or `prime256v1`.
-//! * `P384`: `P-384`, also known as `secp384r1`.
-//!
-//! We take `P256` for example to show the operaions:
-//! ```rust
-//! use sigstore::crypto::signing_key::ecdsa::{ECDSAKeys, EllipticCurve};
-//! use sigstore::crypto::Signature;
-//!
-//! // generate a new EC-P256 key pair
-//! let ec_key_pair = ECDSAKeys::new(EllipticCurve::P256).unwrap();
-//!
-//! // export the pem encoded public key.
-//! // here `as_inner()` will return the reference of `KeyPair` trait object
-//! // underlying this `ECDSAKeys` for key pair operaions.
-//! let pubkey = ec_key_pair.as_inner().public_key_to_pem().unwrap();
-//!
-//! // export the private key using sigstore encryption.
-//! let privkey = ec_key_pair.as_inner().private_key_to_encrypted_pem(b"password").unwrap();
-//!
-//! // also, we can import an [`ECDSAKeys`] of unknown elliptic curve at compile
-//! // time using functions with the prefix `ECDSAKeys::from_`. These functions
-//! // will try to decode the given ecdsa private key using all [`EllipticCurve`]
-//! // enums (suppose the given private key is in PKCS8 format. The PKCS8
-//! // format will carry the key algorithm and its underlying elliptic curve
-//! // identity). If one of them succeeds, return the enum. If all fail, return
-//! // an error. For example:
-//! // let ec_key_pair_import = ECDSAKeys::from_pem(PEM_CONTENT).unwrap();
-//!
-//! // convert this EC key into an [`SigStoreSigner`] enum to sign some data.
-//! // Although different EC key can combine with different digest algorithms to
-//! // form a signing scheme, `P256` is recommended to work with `Sha256` and
-//! // `P384` is recommended to work with `Sha384`. So here we do not include
-//! // extra parameter `SignatureDigestAlgorithm` for `to_sigstore_signer()`.
-//! let ec_signer = ec_key_pair.to_sigstore_signer().unwrap();
-//!
-//! // test message to be signed
-//! let message = b"some message";
-//!
-//! // sign using
-//! let signature_data = ec_signer.sign(message).unwrap();
-//!
-//! // export the [`CosignVerificationKey`] from the [`SigStoreSigner`], which
-//! // is used to verify the signature.
-//! let verification_key = ec_signer.to_verification_key().unwrap();
-//!
-//! // verify
-//! assert!(verification_key.verify_signature(Signature::Raw(&signature_data),message).is_ok());
-/// ```
+
 use crate::errors::*;
 
-use self::ec::{EcdsaKeys, EcdsaSigner};
+use self::ec::{EcdsaKeys, EcdsaSigner, P256, P384};
 
 use super::{KeyPair, SigStoreSigner};
 
 pub mod ec;
 
 pub enum ECDSAKeys {
-    P256(EcdsaKeys<p256::NistP256>),
-    P384(EcdsaKeys<p384::NistP384>),
+    P256(EcdsaKeys<P256>),
+    P384(EcdsaKeys<P384>),
 }
 
 impl std::fmt::Display for ECDSAKeys {
@@ -106,9 +55,9 @@ pub enum EllipticCurve {
 /// This macro helps to reduce duplicated code.
 macro_rules! iterate_on_curves {
     ($func: ident ($($args:expr),*), $errorinfo: literal) => {
-        if let Ok(keys) = EcdsaKeys::<p256::NistP256>::$func($($args,)*) {
+        if let Ok(keys) = EcdsaKeys::<P256>::$func($($args,)*) {
             Ok(ECDSAKeys::P256(keys))
-        } else if let Ok(keys) = EcdsaKeys::<p384::NistP384>::$func($($args,)*) {
+        } else if let Ok(keys) = EcdsaKeys::<P384>::$func($($args,)*) {
             Ok(ECDSAKeys::P384(keys))
         } else {
             Err(SigstoreError::KeyParseError($errorinfo.to_string()))
@@ -120,8 +69,8 @@ impl ECDSAKeys {
     /// Create a new [`ECDSAKeys`] due to the given [`EllipticCurve`].
     pub fn new(curve: EllipticCurve) -> Result<Self> {
         Ok(match curve {
-            EllipticCurve::P256 => ECDSAKeys::P256(EcdsaKeys::<p256::NistP256>::new()?),
-            EllipticCurve::P384 => ECDSAKeys::P384(EcdsaKeys::<p384::NistP384>::new()?),
+            EllipticCurve::P256 => ECDSAKeys::P256(EcdsaKeys::<P256>::new()?),
+            EllipticCurve::P384 => ECDSAKeys::P384(EcdsaKeys::<P384>::new()?),
         })
     }
 
