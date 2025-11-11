@@ -68,12 +68,12 @@
 //!
 //! More use cases please refer to <`https://github.com/sigstore/sigstore-rs/tree/main/examples/key_interface`>
 
-use elliptic_curve::zeroize::Zeroizing;
+use zeroize::Zeroizing;
 
 use crate::errors::*;
 
 use self::{
-    ecdsa::{ECDSAKeys, ec::EcdsaSigner},
+    ecdsa::{ECDSAKeys, ec::{EcdsaSigner, P256, P384}},
     ed25519::{Ed25519Keys, Ed25519Signer},
     rsa::{DigestAlgorithm, PaddingScheme, RSASigner, keypair::RSAKeys},
 };
@@ -316,8 +316,8 @@ pub enum SigStoreSigner {
     RSA_PKCS1_SHA256(RSASigner),
     RSA_PKCS1_SHA384(RSASigner),
     RSA_PKCS1_SHA512(RSASigner),
-    ECDSA_P256_SHA256_ASN1(EcdsaSigner<p256::NistP256, sha2::Sha256>),
-    ECDSA_P384_SHA384_ASN1(EcdsaSigner<p384::NistP384, sha2::Sha384>),
+    ECDSA_P256_SHA256_ASN1(EcdsaSigner<P256, sha2::Sha256>),
+    ECDSA_P384_SHA384_ASN1(EcdsaSigner<P384, sha2::Sha384>),
     ED25519(Ed25519Signer),
 }
 

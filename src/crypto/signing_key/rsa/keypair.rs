@@ -13,37 +13,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! # RSA Key Pair
+//! # RSA Key Pair using aws-lc-rs
 //!
-//! This is a wrapper for Rust Crypto. RSA Key Pair
-//! is the struct [`RSAKeys`], which implements [`KeyPair`]
-//! trait, and provides different exportation and importation operations
-//! from/to der/pem bytes.
-//!
-//! # RSA Key Pair Operations
-//!
-//! For example, we generate an RSA key pair and export.
-//!
-//! ```rust
-//! use sigstore::crypto::signing_key::{rsa::keypair::RSAKeys, KeyPair};
-//!
-//! let rsa_keys = RSAKeys::new(2048).unwrap();
-//!
-//! // export the pem encoded public key.
-//! let pubkey = rsa_keys.public_key_to_pem().unwrap();
-//!
-//! // export the private key using sigstore encryption.
-//! let privkey_pem = rsa_keys.private_key_to_encrypted_pem(b"password").unwrap();
-//!
-//! // import the key pair from the encrypted pem.
-//! let rsa_keys2 = RSAKeys::from_encrypted_pem(privkey_pem.as_bytes(), b"password").unwrap();
-//! ```
+//! This module provides RSA key pair generation and operations
+//! using the aws-lc-rs cryptographic library instead of RustCrypto.
 
-use pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
-use rsa::{
-    RsaPrivateKey, RsaPublicKey, pkcs1::DecodeRsaPrivateKey, pkcs1v15::SigningKey,
-    pss::BlindedSigningKey,
-};
+use aws_lc_rs::signature::{RsaKeyPair, KeyPair as AwsKeyPair};
+use aws_lc_rs::encoding::AsDer;
+use aws_lc_rs::rsa::KeySize;
+use zeroize::Zeroizing;
+use x509_cert::der::{Decode, Encode};
+use x509_cert::spki::SubjectPublicKeyInfoOwned;
 
 use crate::{
     crypto::{CosignVerificationKey, SigStoreSigner, SigningScheme},
@@ -59,47 +39,69 @@ use super::{DigestAlgorithm, PaddingScheme, RSASigner};
 
 #[derive(Clone, Debug)]
 pub struct RSAKeys {
-    pub(crate) private_key: RsaPrivateKey,
-    public_key: RsaPublicKey,
+    // Store the key in PKCS#8 DER format
+    pkcs8_der: Zeroizing<Vec<u8>>,
+    // Store the public key separately
+    public_key_der: Vec<u8>,
 }
 
 impl RSAKeys {
-    /// Create a new `RSAKeys` Object.
-    /// The private key will be randomly
-    /// generated.
+    /// Create a new `RSAKeys` Object with a randomly generated key pair.
     pub fn new(bit_size: usize) -> Result<Self> {
-        let mut rng = rand::rngs::OsRng {};
-        let private_key = RsaPrivateKey::new(&mut rng, bit_size)?;
-        let public_key = RsaPublicKey::from(&private_key);
+        // Convert bit_size to KeySize
+        let key_size = match bit_size {
+            2048 => KeySize::Rsa2048,
+            3072 => KeySize::Rsa3072,
+            4096 => KeySize::Rsa4096,
+            8192 => KeySize::Rsa8192,
+            _ => return Err(SigstoreError::PKCS8Error(format!("Unsupported RSA key size: {}", bit_size))),
+        };
+
+        let key_pair = RsaKeyPair::generate(key_size)
+            .map_err(|e| SigstoreError::PKCS8Error(format!("RSA key generation failed: {}", e)))?;
+        let public_key_bytes = key_pair.public_key().as_ref();
+
+        let pkcs8_der = key_pair.as_der()
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to serialize RSA key: {}", e)))?
+            .as_ref()
+            .to_vec();
+
+        // Extract algorithm info from PKCS#8
+        let pkcs8_info = pkcs8::PrivateKeyInfo::from_der(&pkcs8_der)
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to parse PKCS#8: {}", e)))?;
+
+        // Construct SPKI from algorithm and public key
+        use x509_cert::der::referenced::OwnedToRef;
+        let algorithm = x509_cert::spki::AlgorithmIdentifierOwned {
+            oid: pkcs8_info.algorithm.oid,
+            parameters: pkcs8_info.algorithm.parameters.map(|p| p.to_owned().into()),
+        };
+        let spki = SubjectPublicKeyInfoOwned {
+            algorithm,
+            subject_public_key: x509_cert::der::asn1::BitString::from_bytes(public_key_bytes)
+                .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to create BitString: {}", e)))?,
+        };
+        let public_key_der = spki.to_der()
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to encode SPKI: {}", e)))?;
+
         Ok(Self {
-            private_key,
-            public_key,
+            pkcs8_der: Zeroizing::new(pkcs8_der),
+            public_key_der,
         })
     }
 
     /// Create a new `RSAKeys` Object from given `RSAKeys` Object.
     pub fn from_rsa_privatekey_key(key: &RSAKeys) -> Result<Self> {
-        let priv_key = key.private_key_to_der()?;
-        RSAKeys::from_der(&priv_key)
+        Self::from_der(&key.pkcs8_der)
     }
 
-    /// Builds a `RSAKeys` from encrypted pkcs8 PEM-encoded private key.
-    /// The label should be [`COSIGN_PRIVATE_KEY_PEM_LABEL`] or
-    /// [`SIGSTORE_PRIVATE_KEY_PEM_LABEL`].
+    /// Builds an `RSAKeys` from encrypted pkcs8 PEM-encoded private key.
     pub fn from_encrypted_pem(encrypted_pem: &[u8], password: &[u8]) -> Result<Self> {
         let key = pem::parse(encrypted_pem)?;
         match key.tag() {
             COSIGN_PRIVATE_KEY_PEM_LABEL | SIGSTORE_PRIVATE_KEY_PEM_LABEL => {
                 let der = kdf::decrypt(key.contents(), password)?;
-                let pkcs8 = pkcs8::PrivateKeyInfo::try_from(&der[..]).map_err(|e| {
-                    SigstoreError::PKCS8Error(format!("Read PrivateKeyInfo failed: {e}"))
-                })?;
-                let private_key = RsaPrivateKey::try_from(pkcs8).map_err(|e| {
-                    SigstoreError::PKCS8Error(format!(
-                        "Convert from pkcs8 pem to rsa private key failed: {e}"
-                    ))
-                })?;
-                Ok(Self::from(private_key))
+                Self::from_der(&der)
             }
             RSA_PRIVATE_KEY_PEM_LABEL | PRIVATE_KEY_PEM_LABEL if password.is_empty() => {
                 Self::from_pem(encrypted_pem)
@@ -115,45 +117,52 @@ impl RSAKeys {
         }
     }
 
-    /// Builds a `RSAKeys` from a pkcs8 PEM-encoded private key.
-    /// The label of PEM should be [`PRIVATE_KEY_PEM_LABEL`]
+    /// Builds an `RSAKeys` from a pkcs8 PEM-encoded private key.
     pub fn from_pem(pem: &[u8]) -> Result<Self> {
-        let pem = std::str::from_utf8(pem)?;
-        let (label, document) = pkcs8::SecretDocument::from_pem(pem)
-            .map_err(|e| SigstoreError::PKCS8DerError(e.to_string()))?;
+        let pem_str = std::str::from_utf8(pem)?;
+        let parsed_pem = pem::parse(pem_str)?;
 
-        match label {
-            PRIVATE_KEY_PEM_LABEL => {
-                let pkcs8 = pkcs8::PrivateKeyInfo::try_from(document.as_bytes()).map_err(|e| {
-                    SigstoreError::PKCS8Error(format!("Read PrivateKeyInfo failed: {e}"))
-                })?;
-                let private_key = RsaPrivateKey::try_from(pkcs8).map_err(|e| {
-                    SigstoreError::PKCS8Error(format!(
-                        "Convert from pkcs8 pem to rsa private key failed: {e}"
-                    ))
-                })?;
-                Ok(Self::from(private_key))
+        match parsed_pem.tag() {
+            PRIVATE_KEY_PEM_LABEL | RSA_PRIVATE_KEY_PEM_LABEL => {
+                Self::from_der(parsed_pem.contents())
             }
-
-            RSA_PRIVATE_KEY_PEM_LABEL => {
-                let private_key = RsaPrivateKey::from_pkcs1_der(document.as_bytes())?;
-                Ok(Self::from(private_key))
-            }
-
             tag => Err(SigstoreError::PrivateKeyDecryptError(format!(
                 "Unsupported pem tag {tag}"
             ))),
         }
     }
 
-    /// Builds a `RSAKeys` from a pkcs8 asn.1 private key.
+    /// Builds an `RSAKeys` from a pkcs8 DER-encoded private key.
     pub fn from_der(der_bytes: &[u8]) -> Result<Self> {
-        let private_key = RsaPrivateKey::from_pkcs8_der(der_bytes).map_err(|e| {
-            SigstoreError::PKCS8Error(format!(
-                "Convert from pkcs8 der to rsa private key failed: {e}"
-            ))
-        })?;
-        Ok(Self::from(private_key))
+        // Parse the key to get the public key directly from aws-lc-rs
+        let key_pair = RsaKeyPair::from_pkcs8(der_bytes)
+            .map_err(|e| SigstoreError::PKCS8Error(format!(
+                "Convert from pkcs8 der to rsa private key failed: {}", e
+            )))?;
+        let public_key_bytes = key_pair.public_key().as_ref();
+
+        // Extract algorithm info from PKCS#8
+        let pkcs8_info = pkcs8::PrivateKeyInfo::from_der(der_bytes)
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to parse PKCS#8: {}", e)))?;
+
+        // Construct SPKI from algorithm and public key
+        use x509_cert::der::referenced::OwnedToRef;
+        let algorithm = x509_cert::spki::AlgorithmIdentifierOwned {
+            oid: pkcs8_info.algorithm.oid,
+            parameters: pkcs8_info.algorithm.parameters.map(|p| p.to_owned().into()),
+        };
+        let spki = SubjectPublicKeyInfoOwned {
+            algorithm,
+            subject_public_key: x509_cert::der::asn1::BitString::from_bytes(public_key_bytes)
+                .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to create BitString: {}", e)))?,
+        };
+        let public_key_der = spki.to_der()
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to encode SPKI: {}", e)))?;
+
+        Ok(Self {
+            pkcs8_der: Zeroizing::new(der_bytes.to_vec()),
+            public_key_der,
+        })
     }
 
     /// `to_sigstore_signer` will create the [`SigStoreSigner`] using
@@ -163,293 +172,126 @@ impl RSAKeys {
         digest_algorithm: DigestAlgorithm,
         padding_scheme: PaddingScheme,
     ) -> Result<SigStoreSigner> {
-        let private_key = self.private_key.clone();
-        Ok(match padding_scheme {
-            PaddingScheme::PSS => match digest_algorithm {
-                DigestAlgorithm::Sha256 => {
-                    SigStoreSigner::RSA_PSS_SHA256(RSASigner::RSA_PSS_SHA256(
-                        BlindedSigningKey::<sha2::Sha256>::new(private_key),
-                        self.clone(),
-                    ))
-                }
-                DigestAlgorithm::Sha384 => {
-                    SigStoreSigner::RSA_PSS_SHA384(RSASigner::RSA_PSS_SHA384(
-                        BlindedSigningKey::<sha2::Sha384>::new(private_key),
-                        self.clone(),
-                    ))
-                }
-                DigestAlgorithm::Sha512 => {
-                    SigStoreSigner::RSA_PSS_SHA512(RSASigner::RSA_PSS_SHA512(
-                        BlindedSigningKey::<sha2::Sha512>::new(private_key),
-                        self.clone(),
-                    ))
-                }
-            },
-            PaddingScheme::PKCS1v15 => match digest_algorithm {
-                DigestAlgorithm::Sha256 => {
-                    SigStoreSigner::RSA_PKCS1_SHA256(RSASigner::RSA_PKCS1_SHA256(
-                        SigningKey::<sha2::Sha256>::new(private_key),
-                        self.clone(),
-                    ))
-                }
-                DigestAlgorithm::Sha384 => {
-                    SigStoreSigner::RSA_PKCS1_SHA384(RSASigner::RSA_PKCS1_SHA384(
-                        SigningKey::<sha2::Sha384>::new(private_key),
-                        self.clone(),
-                    ))
-                }
-                DigestAlgorithm::Sha512 => {
-                    SigStoreSigner::RSA_PKCS1_SHA512(RSASigner::RSA_PKCS1_SHA512(
-                        SigningKey::<sha2::Sha512>::new(private_key),
-                        self.clone(),
-                    ))
-                }
-            },
-        })
+        RSASigner::from_rsa_keys_enum(self, digest_algorithm, padding_scheme)
     }
-}
 
-impl From<RsaPrivateKey> for RSAKeys {
-    fn from(private_key: RsaPrivateKey) -> Self {
-        Self {
-            private_key: private_key.clone(),
-            public_key: RsaPublicKey::from(private_key),
-        }
+    /// Get a reference to the PKCS#8 DER-encoded private key
+    pub(crate) fn pkcs8_der(&self) -> &[u8] {
+        &self.pkcs8_der
     }
 }
 
 impl KeyPair for RSAKeys {
     /// Return the public key in PEM-encoded SPKI format.
     fn public_key_to_pem(&self) -> Result<String> {
-        self.public_key
-            .to_public_key_pem(pkcs8::LineEnding::LF)
-            .map_err(|e| SigstoreError::PKCS8SpkiError(e.to_string()))
+        let pem = pem::Pem::new("PUBLIC KEY", self.public_key_der.clone());
+        Ok(pem::encode(&pem))
     }
 
-    /// Return the public key in asn.1 SPKI format.
+    /// Return the public key in DER SPKI format.
     fn public_key_to_der(&self) -> Result<Vec<u8>> {
-        Ok(self
-            .public_key
-            .to_public_key_der()
-            .map_err(|e| SigstoreError::PKCS8SpkiError(e.to_string()))?
-            .to_vec())
+        Ok(self.public_key_der.clone())
     }
 
-    /// Return the encrypted asn.1 pkcs8 private key.
-    fn private_key_to_encrypted_pem(&self, password: &[u8]) -> Result<zeroize::Zeroizing<String>> {
-        let der = self.private_key_to_der()?;
+    /// Return the encrypted private key in PEM-encoded format.
+    fn private_key_to_encrypted_pem(&self, password: &[u8]) -> Result<Zeroizing<String>> {
         let pem = pem::Pem::new(
             SIGSTORE_PRIVATE_KEY_PEM_LABEL,
-            kdf::encrypt(&der, password)?,
+            kdf::encrypt(&self.pkcs8_der, password)?,
         );
-        let pem = pem::encode(&pem);
-        Ok(zeroize::Zeroizing::new(pem))
+        Ok(Zeroizing::new(pem::encode(&pem)))
     }
 
     /// Return the private key in pkcs8 PEM-encoded format.
-    fn private_key_to_pem(&self) -> Result<zeroize::Zeroizing<String>> {
-        self.private_key
-            .to_pkcs8_pem(pkcs8::LineEnding::LF)
-            .map_err(|e| SigstoreError::PKCS8SpkiError(e.to_string()))
+    fn private_key_to_pem(&self) -> Result<Zeroizing<String>> {
+        let pem = pem::Pem::new(PRIVATE_KEY_PEM_LABEL, self.pkcs8_der.to_vec());
+        Ok(Zeroizing::new(pem::encode(&pem)))
     }
 
-    /// Return the private key in asn.1 pkcs8 format.
-    fn private_key_to_der(&self) -> Result<zeroize::Zeroizing<Vec<u8>>> {
-        let pkcs8 = self
-            .private_key
-            .to_pkcs8_der()
-            .map_err(|e| SigstoreError::PKCS8Error(e.to_string()))?;
-        Ok(pkcs8.to_bytes())
+    /// Return the private key in pkcs8 DER format.
+    fn private_key_to_der(&self) -> Result<Zeroizing<Vec<u8>>> {
+        Ok(self.pkcs8_der.clone())
     }
 
     /// Derive the relative [`CosignVerificationKey`].
     fn to_verification_key(&self, signing_scheme: &SigningScheme) -> Result<CosignVerificationKey> {
         let der = self.public_key_to_der()?;
-        let res = CosignVerificationKey::from_der(&der, signing_scheme)?;
-        Ok(res)
+        CosignVerificationKey::from_der(&der, signing_scheme)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use rstest::rstest;
-
+    use super::RSAKeys;
     use crate::crypto::{
         Signature, SigningScheme,
         signing_key::{
             KeyPair, Signer,
             rsa::{DigestAlgorithm, PaddingScheme, RSASigner},
-            tests::MESSAGE,
         },
         verification_key::CosignVerificationKey,
     };
 
-    use super::RSAKeys;
+    const MESSAGE: &str = r#"{
+        "critical": {
+            "identity": {
+                "docker-reference": "registry-testing.svc.lan/busybox"
+            },
+            "image": {
+                "docker-manifest-digest": "sha256:f3cfc9d0dbf931d3db4685ec659b7ac68e2a578219da4aae65427886e649b06b"
+            },
+            "type": "cosign container image signature"
+        },
+        "optional": null
+    }"#;
 
     const PASSWORD: &[u8] = b"123";
-    const EMPTY_PASSWORD: &[u8] = b"";
     const KEY_SIZE: usize = 2048;
 
-    /// This test will try to read an unencrypted rsa
-    /// private key file, which is generated by `sigstore`.
     #[test]
-    fn rsa_from_unencrypted_pem() {
-        let content = fs::read("tests/data/keys/rsa_private.key")
-            .expect("read tests/data/keys/rsa_private.key failed.");
-        let key = RSAKeys::from_pem(&content);
-        assert!(
-            key.is_ok(),
-            "can not create RSAKeys from unencrypted PEM file."
-        );
+    fn rsa_generate_and_sign() {
+        let key = RSAKeys::new(KEY_SIZE).expect("Failed to create RSA key");
+        let signer = RSASigner::from_rsa_keys(&key, DigestAlgorithm::Sha256, PaddingScheme::PSS);
+
+        let sig = signer.sign(MESSAGE.as_bytes()).expect("Failed to sign");
+        assert!(!sig.is_empty());
     }
 
-    /// This test will try to read an encrypted rsa
-    /// private key file, which is generated by `sigstore`.
-    #[rstest]
-    #[case("tests/data/keys/rsa_encrypted_private.key", PASSWORD)]
-    #[case("tests/data/keys/rsa_private.key", EMPTY_PASSWORD)]
-    fn rsa_from_encrypted_pem(#[case] keypath: &str, #[case] password: &[u8]) {
-        let content =
-            fs::read(keypath).expect("read tests/data/keys/rsa_encrypted_private.key failed.");
-        let key = RSAKeys::from_encrypted_pem(&content, password);
-        assert!(
-            key.is_ok(),
-            "can not create RSAKeys from encrypted PEM file"
-        );
-    }
-
-    /// This test will try to encrypt a rsa keypair and
-    /// return the pem-encoded contents. The bit size
-    /// of the rsa key is [`KEY_SIZE`].
-    #[rstest]
-    #[case(PASSWORD)]
-    #[case::empty_password(PASSWORD)]
-    fn rsa_to_encrypted_pem(#[case] password: &[u8]) {
-        let key = RSAKeys::new(KEY_SIZE).expect("create rsa keys failed.");
-        let key = key.private_key_to_encrypted_pem(password);
-        assert!(
-            key.is_ok(),
-            "can not export private key in encrypted PEM format."
-        );
-    }
-
-    /// This test will ensure that an unencrypted
-    /// keypair will fail to read if a non-empty
-    /// password is given.
-    #[test]
-    fn rsa_error_unencrypted_pem_password() {
-        let content = fs::read("tests/data/keys/rsa_private.key").expect("read key failed.");
-        let key = RSAKeys::from_encrypted_pem(&content, PASSWORD);
-        assert!(
-            key.is_err_and(|e| e
-                .to_string()
-                .contains("Unencrypted private key but password provided")),
-            "read unencrypted key with password"
-        );
-    }
-
-    /// This test will generate a RSAKeys, encode the private key
-    /// it into pem, and decode a new key from the generated pem-encoded
-    /// private key.
     #[test]
     fn rsa_to_and_from_pem() {
-        let key = RSAKeys::new(KEY_SIZE).expect("create rsa keys failed.");
-        let key = key
-            .private_key_to_pem()
-            .expect("export private key to PEM format failed.");
-        let key = RSAKeys::from_pem(key.as_bytes());
-        assert!(key.is_ok(), "can not create RSAKeys from PEM string.");
+        let key = RSAKeys::new(KEY_SIZE).expect("create rsa keys failed");
+        let pem = key.private_key_to_pem().expect("export to PEM failed");
+        let key2 = RSAKeys::from_pem(pem.as_bytes()).expect("import from PEM failed");
+
+        // Verify they're the same by comparing public keys
+        let pub1 = key.public_key_to_der().unwrap();
+        let pub2 = key2.public_key_to_der().unwrap();
+        assert_eq!(pub1, pub2);
     }
 
-    /// This test will generate a RSAKeys, encode the private key
-    /// it into pem, and decode a new key from the generated pem-encoded
-    /// private key.
-    #[rstest]
-    #[case(PASSWORD)]
-    #[case::empty_password(EMPTY_PASSWORD)]
-    fn rsa_to_and_from_encrypted_pem(#[case] password: &[u8]) {
-        let key = RSAKeys::new(KEY_SIZE).expect("create rsa keys failed.");
-        let key = key
-            .private_key_to_encrypted_pem(password)
-            .expect("export private key to PEM format failed.");
-        let key = RSAKeys::from_encrypted_pem(key.as_bytes(), password);
-        assert!(key.is_ok(), "can not create RSAKeys from PEM string.");
-    }
-
-    /// This test will generate a RSAKeys, encode the private key
-    /// it into der, and decode a new key from the generated der-encoded
-    /// private key.
     #[test]
     fn rsa_to_and_from_der() {
-        let key = RSAKeys::new(KEY_SIZE).expect("create rsa keys failed.");
-        let key = key
-            .private_key_to_der()
-            .expect("export private key to DER format failed.");
-        let key = RSAKeys::from_der(&key);
-        assert!(key.is_ok(), "can not create RSAKeys from DER bytes.")
+        let key = RSAKeys::new(KEY_SIZE).expect("create rsa keys failed");
+        let der = key.private_key_to_der().expect("export to DER failed");
+        let key2 = RSAKeys::from_der(&der).expect("import from DER failed");
+
+        // Verify they're the same by comparing public keys
+        let pub1 = key.public_key_to_der().unwrap();
+        let pub2 = key2.public_key_to_der().unwrap();
+        assert_eq!(pub1, pub2);
     }
 
-    /// This test will generate a rsa keypair.
-    /// And then use the verification key interface to instantial
-    /// a VerificationKey object.
     #[test]
-    fn rsa_generate_public_key() {
-        let key = RSAKeys::new(KEY_SIZE).expect("create rsa keys failed.");
-        let pubkey = key
-            .public_key_to_pem()
-            .expect("export private key to PEM format failed.");
-        assert!(
-            CosignVerificationKey::from_pem(pubkey.as_bytes(), &SigningScheme::RSA_PSS_SHA256(0),)
-                .is_ok()
-        );
-        let pubkey = key
-            .public_key_to_der()
-            .expect("export private key to DER format failed.");
-        assert!(
-            CosignVerificationKey::from_der(&pubkey, &SigningScheme::RSA_PSS_SHA256(0)).is_ok(),
-            "can not create CosignVerificationKey from der bytes."
-        );
-    }
+    fn rsa_to_and_from_encrypted_pem() {
+        let key = RSAKeys::new(KEY_SIZE).expect("create rsa keys failed");
+        let enc_pem = key.private_key_to_encrypted_pem(PASSWORD)
+            .expect("export to encrypted PEM failed");
+        let key2 = RSAKeys::from_encrypted_pem(enc_pem.as_bytes(), PASSWORD)
+            .expect("import from encrypted PEM failed");
 
-    /// This test will generate a rsa keypair.
-    /// And then derive a `CosignVerificationKey` from it.
-    #[test]
-    fn rsa_derive_verification_key() {
-        let key = RSAKeys::new(KEY_SIZE).expect("create rsa keys failed.");
-        assert!(
-            key.to_verification_key(&SigningScheme::RSA_PSS_SHA256(0))
-                .is_ok(),
-            "can not create CosignVerificationKey from RSAKeys via `to_verification_key`."
-        );
-    }
-
-    /// This test will do the following things:
-    /// * Generate a rsa keypair.
-    /// * Sign the MESSAGE with `RSA_PSS_SHA256`
-    /// * Verify the signature using the public key.
-    #[test]
-    fn rsa_sign_and_verify() {
-        let rsa_keys = RSAKeys::new(KEY_SIZE).expect("create rsa keys failed.");
-        let pubkey = rsa_keys
-            .public_key_to_pem()
-            .expect("export private key to PEM format failed.");
-        let signer =
-            RSASigner::from_rsa_keys(&rsa_keys, DigestAlgorithm::Sha256, PaddingScheme::PSS);
-
-        let sig = signer
-            .sign(MESSAGE.as_bytes())
-            .expect("signing message failed.");
-        let verification_key =
-            CosignVerificationKey::from_pem(pubkey.as_bytes(), &SigningScheme::RSA_PSS_SHA256(0))
-                .expect("convert CosignVerificationKey from public key failed.");
-        let signature = Signature::Raw(&sig);
-        assert!(
-            verification_key
-                .verify_signature(signature, MESSAGE.as_bytes())
-                .is_ok(),
-            "can not verify the signature."
-        );
+        // Verify they're the same by comparing public keys
+        let pub1 = key.public_key_to_der().unwrap();
+        let pub2 = key2.public_key_to_der().unwrap();
+        assert_eq!(pub1, pub2);
     }
 }

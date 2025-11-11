@@ -75,15 +75,15 @@
 /// ```
 use crate::errors::*;
 
-use self::ec::{EcdsaKeys, EcdsaSigner};
+use self::ec::{EcdsaKeys, EcdsaSigner, P256, P384};
 
 use super::{KeyPair, SigStoreSigner};
 
 pub mod ec;
 
 pub enum ECDSAKeys {
-    P256(EcdsaKeys<p256::NistP256>),
-    P384(EcdsaKeys<p384::NistP384>),
+    P256(EcdsaKeys<P256>),
+    P384(EcdsaKeys<P384>),
 }
 
 impl std::fmt::Display for ECDSAKeys {
@@ -106,9 +106,9 @@ pub enum EllipticCurve {
 /// This macro helps to reduce duplicated code.
 macro_rules! iterate_on_curves {
     ($func: ident ($($args:expr),*), $errorinfo: literal) => {
-        if let Ok(keys) = EcdsaKeys::<p256::NistP256>::$func($($args,)*) {
+        if let Ok(keys) = EcdsaKeys::<P256>::$func($($args,)*) {
             Ok(ECDSAKeys::P256(keys))
-        } else if let Ok(keys) = EcdsaKeys::<p384::NistP384>::$func($($args,)*) {
+        } else if let Ok(keys) = EcdsaKeys::<P384>::$func($($args,)*) {
             Ok(ECDSAKeys::P384(keys))
         } else {
             Err(SigstoreError::KeyParseError($errorinfo.to_string()))
@@ -120,8 +120,8 @@ impl ECDSAKeys {
     /// Create a new [`ECDSAKeys`] due to the given [`EllipticCurve`].
     pub fn new(curve: EllipticCurve) -> Result<Self> {
         Ok(match curve {
-            EllipticCurve::P256 => ECDSAKeys::P256(EcdsaKeys::<p256::NistP256>::new()?),
-            EllipticCurve::P384 => ECDSAKeys::P384(EcdsaKeys::<p384::NistP384>::new()?),
+            EllipticCurve::P256 => ECDSAKeys::P256(EcdsaKeys::<P256>::new()?),
+            EllipticCurve::P384 => ECDSAKeys::P384(EcdsaKeys::<P384>::new()?),
         })
     }
 

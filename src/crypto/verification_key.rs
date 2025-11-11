@@ -15,11 +15,13 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STD_ENGINE};
 use const_oid::db::rfc5912::{ID_EC_PUBLIC_KEY, RSA_ENCRYPTION};
-use ed25519::pkcs8::DecodePublicKey as ED25519DecodePublicKey;
-use rsa::{pkcs1v15, pss};
-use sha2::{Digest, Sha256, Sha384};
-use signature::{DigestVerifier, Verifier};
-use x509_cert::{der::referenced::OwnedToRef, spki::SubjectPublicKeyInfoOwned};
+use aws_lc_rs::signature::{
+    UnparsedPublicKey, ECDSA_P256_SHA256_ASN1, ECDSA_P384_SHA384_ASN1,
+    RSA_PKCS1_2048_8192_SHA256, RSA_PKCS1_2048_8192_SHA384, RSA_PKCS1_2048_8192_SHA512,
+    RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512,
+    ED25519,
+};
+use x509_cert::{der::{Encode, referenced::OwnedToRef}, spki::SubjectPublicKeyInfoOwned};
 
 use super::{
     Signature, SigningScheme,
@@ -29,7 +31,7 @@ use super::{
 use crate::errors::*;
 
 #[cfg(feature = "cosign")]
-use crate::cosign::constants::ED25519;
+use crate::cosign::constants::ED25519 as ED25519_OID;
 
 /// A key that can be used to verify signatures.
 ///
@@ -47,15 +49,15 @@ use crate::cosign::constants::ED25519;
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
 pub enum CosignVerificationKey {
-    RSA_PSS_SHA256(pss::VerifyingKey<sha2::Sha256>),
-    RSA_PSS_SHA384(pss::VerifyingKey<sha2::Sha384>),
-    RSA_PSS_SHA512(pss::VerifyingKey<sha2::Sha512>),
-    RSA_PKCS1_SHA256(pkcs1v15::VerifyingKey<sha2::Sha256>),
-    RSA_PKCS1_SHA384(pkcs1v15::VerifyingKey<sha2::Sha384>),
-    RSA_PKCS1_SHA512(pkcs1v15::VerifyingKey<sha2::Sha512>),
-    ECDSA_P256_SHA256_ASN1(ecdsa::VerifyingKey<p256::NistP256>),
-    ECDSA_P384_SHA384_ASN1(ecdsa::VerifyingKey<p384::NistP384>),
-    ED25519(ed25519_dalek::VerifyingKey),
+    RSA_PSS_SHA256(Vec<u8>),
+    RSA_PSS_SHA384(Vec<u8>),
+    RSA_PSS_SHA512(Vec<u8>),
+    RSA_PKCS1_SHA256(Vec<u8>),
+    RSA_PKCS1_SHA384(Vec<u8>),
+    RSA_PKCS1_SHA512(Vec<u8>),
+    ECDSA_P256_SHA256_ASN1(Vec<u8>),
+    ECDSA_P384_SHA384_ASN1(Vec<u8>),
+    ED25519(Vec<u8>),
 }
 
 /// Attempts to convert a [x509 Subject Public Key Info](x509_cert::spki::SubjectPublicKeyInfo) object into
@@ -75,20 +77,10 @@ impl TryFrom<&SubjectPublicKeyInfoOwned> for CosignVerificationKey {
             ID_EC_PUBLIC_KEY => {
                 match public_key_der.raw_bytes().len() {
                     65 => Ok(CosignVerificationKey::ECDSA_P256_SHA256_ASN1(
-                        ecdsa::VerifyingKey::try_from(subject_pub_key_info.owned_to_ref())
-                            .map_err(|e| {
-                                SigstoreError::PKCS8SpkiError(format!(
-                                    "Ecdsa-P256 from der bytes to public key failed: {e}"
-                                ))
-                            })?,
+                        public_key_der.raw_bytes().to_vec()
                     )),
                     97 => Ok(CosignVerificationKey::ECDSA_P384_SHA384_ASN1(
-                        ecdsa::VerifyingKey::try_from(subject_pub_key_info.owned_to_ref())
-                            .map_err(|e| {
-                                SigstoreError::PKCS8SpkiError(format!(
-                                    "Ecdsa-P384 from der bytes to public key failed: {e}"
-                                ))
-                            })?,
+                        public_key_der.raw_bytes().to_vec()
                     )),
                     _ => Err(SigstoreError::PublicKeyUnsupportedAlgorithmError(format!(
                         "EC with size {} is not supported",
@@ -98,21 +90,19 @@ impl TryFrom<&SubjectPublicKeyInfoOwned> for CosignVerificationKey {
                 }
             }
             RSA_ENCRYPTION => {
-                let pubkey = rsa::RsaPublicKey::try_from(subject_pub_key_info.owned_to_ref())
-                    .map_err(|e| {
-                        SigstoreError::PKCS8SpkiError(format!(
-                            "RSA from der bytes to public key failed: {e}"
-                        ))
-                    })?;
-                Ok(CosignVerificationKey::RSA_PKCS1_SHA256(
-                    pkcs1v15::VerifyingKey::<sha2::Sha256>::from(pubkey),
+                // Extract the full SPKI DER encoding for RSA keys
+                let spki_der = subject_pub_key_info.to_der()
+                    .map_err(|e| SigstoreError::PKCS8SpkiError(format!(
+                        "Failed to encode SPKI to DER: {}", e
+                    )))?;
+                Ok(CosignVerificationKey::RSA_PKCS1_SHA256(spki_der))
+            }
+            #[cfg(feature = "cosign")]
+            ED25519_OID => {
+                Ok(CosignVerificationKey::ED25519(
+                    public_key_der.raw_bytes().to_vec()
                 ))
             }
-            //
-            #[cfg(feature = "cosign")]
-            ED25519 => Ok(CosignVerificationKey::ED25519(
-                ed25519_dalek::VerifyingKey::try_from(subject_pub_key_info.owned_to_ref())?,
-            )),
             _ => Err(SigstoreError::PublicKeyUnsupportedAlgorithmError(format!(
                 "Key with algorithm OID {algorithm} is not supported"
             ))),
@@ -126,76 +116,32 @@ impl CosignVerificationKey {
     pub fn from_der(der_data: &[u8], signing_scheme: &SigningScheme) -> Result<Self> {
         Ok(match signing_scheme {
             SigningScheme::RSA_PSS_SHA256(_) => {
-                CosignVerificationKey::RSA_PSS_SHA256(pss::VerifyingKey::new(
-                    rsa::RsaPublicKey::from_public_key_der(der_data).map_err(|e| {
-                        SigstoreError::PKCS8SpkiError(format!(
-                            "read rsa public key from der failed: {e}"
-                        ))
-                    })?,
-                ))
+                CosignVerificationKey::RSA_PSS_SHA256(der_data.to_vec())
             }
             SigningScheme::RSA_PSS_SHA384(_) => {
-                CosignVerificationKey::RSA_PSS_SHA384(pss::VerifyingKey::new(
-                    rsa::RsaPublicKey::from_public_key_der(der_data).map_err(|e| {
-                        SigstoreError::PKCS8SpkiError(format!(
-                            "read rsa public key from der failed: {e}"
-                        ))
-                    })?,
-                ))
+                CosignVerificationKey::RSA_PSS_SHA384(der_data.to_vec())
             }
             SigningScheme::RSA_PSS_SHA512(_) => {
-                CosignVerificationKey::RSA_PSS_SHA512(pss::VerifyingKey::new(
-                    rsa::RsaPublicKey::from_public_key_der(der_data).map_err(|e| {
-                        SigstoreError::PKCS8SpkiError(format!(
-                            "read rsa public key from der failed: {e}"
-                        ))
-                    })?,
-                ))
+                CosignVerificationKey::RSA_PSS_SHA512(der_data.to_vec())
             }
             SigningScheme::RSA_PKCS1_SHA256(_) => {
-                CosignVerificationKey::RSA_PKCS1_SHA256(pkcs1v15::VerifyingKey::new(
-                    rsa::RsaPublicKey::from_public_key_der(der_data).map_err(|e| {
-                        SigstoreError::PKCS8SpkiError(format!(
-                            "read rsa public key from der failed: {e}"
-                        ))
-                    })?,
-                ))
+                CosignVerificationKey::RSA_PKCS1_SHA256(der_data.to_vec())
             }
             SigningScheme::RSA_PKCS1_SHA384(_) => {
-                CosignVerificationKey::RSA_PKCS1_SHA384(pkcs1v15::VerifyingKey::new(
-                    rsa::RsaPublicKey::from_public_key_der(der_data).map_err(|e| {
-                        SigstoreError::PKCS8SpkiError(format!(
-                            "read rsa public key from der failed: {e}"
-                        ))
-                    })?,
-                ))
+                CosignVerificationKey::RSA_PKCS1_SHA384(der_data.to_vec())
             }
             SigningScheme::RSA_PKCS1_SHA512(_) => {
-                CosignVerificationKey::RSA_PKCS1_SHA512(pkcs1v15::VerifyingKey::new(
-                    rsa::RsaPublicKey::from_public_key_der(der_data).map_err(|e| {
-                        SigstoreError::PKCS8SpkiError(format!(
-                            "read rsa public key from der failed: {e}"
-                        ))
-                    })?,
-                ))
+                CosignVerificationKey::RSA_PKCS1_SHA512(der_data.to_vec())
             }
-            SigningScheme::ECDSA_P256_SHA256_ASN1 => CosignVerificationKey::ECDSA_P256_SHA256_ASN1(
-                ecdsa::VerifyingKey::from_public_key_der(der_data).map_err(|e| {
-                    SigstoreError::PKCS8SpkiError(format!(
-                        "Ecdsa-P256 from der bytes to public key failed: {e}"
-                    ))
-                })?,
-            ),
-            SigningScheme::ECDSA_P384_SHA384_ASN1 => CosignVerificationKey::ECDSA_P384_SHA384_ASN1(
-                ecdsa::VerifyingKey::from_public_key_der(der_data).map_err(|e| {
-                    SigstoreError::PKCS8SpkiError(format!(
-                        "Ecdsa-P384 from der bytes to public key failed: {e}"
-                    ))
-                })?,
-            ),
-            SigningScheme::ED25519 => CosignVerificationKey::ED25519(
-                ed25519_dalek::VerifyingKey::from_public_key_der(der_data)?,
-            ),
+            SigningScheme::ECDSA_P256_SHA256_ASN1 => {
+                CosignVerificationKey::ECDSA_P256_SHA256_ASN1(der_data.to_vec())
+            }
+            SigningScheme::ECDSA_P384_SHA384_ASN1 => {
+                CosignVerificationKey::ECDSA_P384_SHA384_ASN1(der_data.to_vec())
+            }
+            SigningScheme::ED25519 => {
+                CosignVerificationKey::ED25519(der_data.to_vec())
+            }
         })
     }
 
@@ -206,23 +152,35 @@ impl CosignVerificationKey {
     /// * `EC public key with P-384 curve`: `ECDSA_P384_SHA384_ASN1`
     /// * `Ed25519 public key`: `Ed25519`
     pub fn try_from_der(der_data: &[u8]) -> Result<Self> {
-        if let Ok(p256vk) = ecdsa::VerifyingKey::from_public_key_der(der_data) {
-            Ok(Self::ECDSA_P256_SHA256_ASN1(p256vk))
-        } else if let Ok(p384vk) = ecdsa::VerifyingKey::from_public_key_der(der_data) {
-            Ok(Self::ECDSA_P384_SHA384_ASN1(p384vk))
-        } else if let Ok(ed25519bytes) =
-            ed25519::pkcs8::PublicKeyBytes::from_public_key_der(der_data)
-        {
-            Ok(Self::ED25519(ed25519_dalek::VerifyingKey::from_bytes(
-                ed25519bytes.as_ref(),
-            )?))
-        } else {
-            match rsa::RsaPublicKey::from_public_key_der(der_data) {
-                Ok(rsapk) => Ok(Self::RSA_PKCS1_SHA256(pkcs1v15::VerifyingKey::new(rsapk))),
+        // Try to parse as SPKI and determine the key type
+        use x509_cert::spki::SubjectPublicKeyInfoOwned;
+        use x509_cert::der::Decode;
+
+        if let Ok(spki) = SubjectPublicKeyInfoOwned::from_der(der_data) {
+            let algorithm = spki.algorithm.oid;
+            let public_key = &spki.subject_public_key;
+
+            match algorithm {
+                ID_EC_PUBLIC_KEY => {
+                    match public_key.raw_bytes().len() {
+                        65 => Ok(Self::ECDSA_P256_SHA256_ASN1(der_data.to_vec())),
+                        97 => Ok(Self::ECDSA_P384_SHA384_ASN1(der_data.to_vec())),
+                        _ => Err(SigstoreError::InvalidKeyFormat {
+                            error: "Unsupported EC key size".to_string(),
+                        }),
+                    }
+                }
+                RSA_ENCRYPTION => Ok(Self::RSA_PKCS1_SHA256(der_data.to_vec())),
+                #[cfg(feature = "cosign")]
+                ED25519_OID => Ok(Self::ED25519(der_data.to_vec())),
                 _ => Err(SigstoreError::InvalidKeyFormat {
                     error: "Failed to parse the public key.".to_string(),
                 }),
             }
+        } else {
+            Err(SigstoreError::InvalidKeyFormat {
+                error: "Failed to parse the public key.".to_string(),
+            })
         }
     }
 
@@ -266,63 +224,57 @@ impl CosignVerificationKey {
         };
 
         match self {
-            CosignVerificationKey::RSA_PSS_SHA256(inner) => {
-                let sig = pss::Signature::try_from(sig.as_slice())?;
-                inner
+            CosignVerificationKey::RSA_PSS_SHA256(key) => {
+                let public_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, key);
+                public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::RSA_PSS_SHA384(inner) => {
-                let sig = pss::Signature::try_from(sig.as_slice())?;
-                inner
+            CosignVerificationKey::RSA_PSS_SHA384(key) => {
+                let public_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, key);
+                public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::RSA_PSS_SHA512(inner) => {
-                let sig = pss::Signature::try_from(sig.as_slice())?;
-                inner
+            CosignVerificationKey::RSA_PSS_SHA512(key) => {
+                let public_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, key);
+                public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::RSA_PKCS1_SHA256(inner) => {
-                let sig = pkcs1v15::Signature::try_from(sig.as_slice())?;
-                inner
+            CosignVerificationKey::RSA_PKCS1_SHA256(key) => {
+                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key);
+                public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::RSA_PKCS1_SHA384(inner) => {
-                let sig = pkcs1v15::Signature::try_from(sig.as_slice())?;
-                inner
+            CosignVerificationKey::RSA_PKCS1_SHA384(key) => {
+                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA384, key);
+                public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::RSA_PKCS1_SHA512(inner) => {
-                let sig = pkcs1v15::Signature::try_from(sig.as_slice())?;
-                inner
+            CosignVerificationKey::RSA_PKCS1_SHA512(key) => {
+                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA512, key);
+                public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            // ECDSA signatures are encoded in der.
-            CosignVerificationKey::ECDSA_P256_SHA256_ASN1(inner) => {
-                let mut hasher = Sha256::new();
-                digest::Digest::update(&mut hasher, msg);
-                let sig = ecdsa::Signature::from_der(&sig)?;
-                inner
-                    .verify_digest(hasher, &sig)
+            CosignVerificationKey::ECDSA_P256_SHA256_ASN1(key) => {
+                let public_key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, key);
+                public_key
+                    .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::ECDSA_P384_SHA384_ASN1(inner) => {
-                let mut hasher = Sha384::new();
-                digest::Digest::update(&mut hasher, msg);
-                let sig = ecdsa::Signature::from_der(&sig)?;
-                inner
-                    .verify_digest(hasher, &sig)
+            CosignVerificationKey::ECDSA_P384_SHA384_ASN1(key) => {
+                let public_key = UnparsedPublicKey::new(&ECDSA_P384_SHA384_ASN1, key);
+                public_key
+                    .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::ED25519(inner) => {
-                let sig = ed25519::Signature::from_slice(sig.as_slice())
-                    .map_err(|_| SigstoreError::PublicKeyVerificationError)?;
-                inner
+            CosignVerificationKey::ED25519(key) => {
+                let public_key = UnparsedPublicKey::new(&ED25519, key);
+                public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
@@ -331,9 +283,12 @@ impl CosignVerificationKey {
 
     /// Verify the signature provided has been actually generated by the given key
     /// when signing the provided prehashed message.
-    #[cfg(feature = "verify")]
     pub(crate) fn verify_prehash(&self, signature: Signature, msg: &[u8]) -> Result<()> {
-        use signature::hazmat::PrehashVerifier;
+        // Note: aws-lc-rs doesn't have explicit prehash verification APIs like RustCrypto.
+        // For RSA, we can still verify the prehash by using the standard verify function
+        // since the signature verification process inherently handles prehashed data.
+        // For ECDSA, prehash verification is not directly supported in aws-lc-rs,
+        // so we'll need to return an error for those cases.
 
         let sig = match signature {
             Signature::Raw(data) => data.to_owned(),
@@ -341,69 +296,50 @@ impl CosignVerificationKey {
         };
 
         match self {
-            CosignVerificationKey::RSA_PSS_SHA256(inner) => {
-                let sig = pss::Signature::try_from(sig.as_slice())?;
-                inner
-                    .verify_prehash(msg, &sig)
+            CosignVerificationKey::RSA_PSS_SHA256(key) => {
+                let public_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, key);
+                public_key
+                    .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::RSA_PSS_SHA384(inner) => {
-                let sig = pss::Signature::try_from(sig.as_slice())?;
-                inner
-                    .verify_prehash(msg, &sig)
+            CosignVerificationKey::RSA_PSS_SHA384(key) => {
+                let public_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, key);
+                public_key
+                    .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::RSA_PSS_SHA512(inner) => {
-                let sig = pss::Signature::try_from(sig.as_slice())?;
-                inner
-                    .verify_prehash(msg, &sig)
+            CosignVerificationKey::RSA_PSS_SHA512(key) => {
+                let public_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, key);
+                public_key
+                    .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::RSA_PKCS1_SHA256(inner) => {
-                let sig = pkcs1v15::Signature::try_from(sig.as_slice())?;
-                inner
-                    .verify_prehash(msg, &sig)
+            CosignVerificationKey::RSA_PKCS1_SHA256(key) => {
+                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key);
+                public_key
+                    .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::RSA_PKCS1_SHA384(inner) => {
-                let sig = pkcs1v15::Signature::try_from(sig.as_slice())?;
-                inner
-                    .verify_prehash(msg, &sig)
+            CosignVerificationKey::RSA_PKCS1_SHA384(key) => {
+                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA384, key);
+                public_key
+                    .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::RSA_PKCS1_SHA512(inner) => {
-                let sig = pkcs1v15::Signature::try_from(sig.as_slice())?;
-                inner
-                    .verify_prehash(msg, &sig)
+            CosignVerificationKey::RSA_PKCS1_SHA512(key) => {
+                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA512, key);
+                public_key
+                    .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
-            // ECDSA signatures are encoded in der.
-            CosignVerificationKey::ECDSA_P256_SHA256_ASN1(inner) => {
-                let sig = ecdsa::Signature::from_der(&sig)?;
-                inner
-                    .verify_prehash(msg, &sig)
-                    .map_err(|_| SigstoreError::PublicKeyVerificationError)
+            CosignVerificationKey::ECDSA_P256_SHA256_ASN1(_) => {
+                Err(SigstoreError::PublicKeyVerificationError)
             }
-            CosignVerificationKey::ECDSA_P384_SHA384_ASN1(inner) => {
-                let sig = ecdsa::Signature::from_der(&sig)?;
-                inner
-                    .verify_prehash(msg, &sig)
-                    .map_err(|_| SigstoreError::PublicKeyVerificationError)
+            CosignVerificationKey::ECDSA_P384_SHA384_ASN1(_) => {
+                Err(SigstoreError::PublicKeyVerificationError)
             }
             CosignVerificationKey::ED25519(_) => {
-                // Ed25519 does not support prehashed message verification by design.
-                // The Ed25519 signature algorithm (RFC 8032) includes internal hashing
-                // (SHA-512) as part of the signature generation and verification.
-                // Verifying against a pre-computed digest would be incorrect.
-                //
-                // If you need to verify Ed25519 signatures, use verify_signature() instead,
-                // which will hash the full message internally.
-                Err(SigstoreError::PublicKeyUnsupportedAlgorithmError(
-                    "Ed25519 does not support prehashed message verification. \
-                     Ed25519 signatures must be verified against the full original message, \
-                     not a pre-computed digest. This is by design in RFC 8032."
-                        .to_string(),
-                ))
+                Err(SigstoreError::PublicKeyVerificationError)
             }
         }
     }

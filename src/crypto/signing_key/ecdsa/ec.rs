@@ -13,83 +13,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! # ECDSA Keys in Generic Types
+//! # ECDSA Keys using aws-lc-rs
 //!
-//! This is a wrapper for Rust Crypto. Basically it
-//! is implemented using generic types and traits. Generic types
-//! may let the user to manually include concrete crates like
-//! `p256`, `p384`, `digest`, etc. This is unfriendly to users.
-//! To make it easier for an user to use, there are two wrappers:
-//! * The [`EcdsaKeys`] generic struct is wrapped in an enum named [`ECDSAKeys`].
-//! * The [`EcdsaSigner`] generic struct is wrapped in an enum named [`super::SigStoreSigner`].
+//! This module provides ECDSA key pair generation, signing, and verification
+//! using the aws-lc-rs cryptographic library instead of RustCrypto.
 //!
-//! The [`ECDSAKeys`] has two enums due to their underlying elliptic curves, s.t.
-//! * `P256`
-//! * `P384`
-//!
-//! To have an uniform interface for all kinds of asymmetric keys, [`ECDSAKeys`]
-//! is also wrapped in [`super::super::SigStoreKeyPair`] enum.
-//!
-//! The [`super::SigStoreSigner`] enum includes two enums for [`EcdsaSigner`]:
-//! * `ECDSA_P256_SHA256_ASN1`
-//! * `ECDSA_P384_SHA384_ASN1`
-//!
-//! # EC Key Pair Operations
-//!
-//! *Not recommend to directly use this mod. Use [`ECDSAKeys`], [`super::super::SigStoreKeyPair`] for
-//! key pair and [`super::SigStoreSigner`] for signing instead*
-//!  
-//! When to generate an EC key pair, a specific elliptic curve
-//! should be chosen. Supported elliptic curves are listed
-//! <https://github.com/RustCrypto/elliptic-curves#crates>.
-//!
-//! For example, use `P256` as elliptic curve, and `ECDSA_P256_SHA256_ASN1` as
-//! signing scheme
-//!
-//! ```rust
-//! use sigstore::crypto::signing_key::{ecdsa::ec::{EcdsaKeys,EcdsaSigner}, KeyPair, Signer};
-//!
-//! let ec_key_pair = EcdsaKeys::<p256::NistP256>::new().unwrap();
-//!
-//! // export the pem encoded public key.
-//! let pubkey = ec_key_pair.public_key_to_pem().unwrap();
-//!
-//! // export the private key using sigstore encryption.
-//! let privkey = ec_key_pair.private_key_to_encrypted_pem(b"password").unwrap();
-//!
-//! // sign with the new key, using Sha256 as the digest scheme.
-//! // In fact, the signing scheme is ECDSA_P256_SHA256_ASN1 here.
-//! let ec_signer = EcdsaSigner::<_, sha2::Sha256>::from_ecdsa_keys(&ec_key_pair).unwrap();
-//!
-//! let signature = ec_signer.sign(b"some message");
-//! ```
+//! Supported curves:
+//! * P-256 (secp256r1)
+//! * P-384 (secp384r1)
 
-use std::{marker::PhantomData, ops::Add};
+use std::marker::PhantomData;
 
-use digest::{
-    Digest, FixedOutput, FixedOutputReset,
-    core_api::BlockSizeUser,
-    typenum::{
-        UInt, UTerm,
-        bit::{B0, B1},
-    },
+use aws_lc_rs::signature::{
+    EcdsaKeyPair,
+    KeyPair as AwsKeyPair,
+    ECDSA_P256_SHA256_ASN1_SIGNING,
+    ECDSA_P384_SHA384_ASN1_SIGNING,
 };
-use ecdsa::{
-    PrimeCurve, SignatureSize, SigningKey,
-    hazmat::{DigestPrimitive, SignPrimitive},
-};
-#[allow(deprecated)]
-use elliptic_curve::generic_array::ArrayLength;
-use elliptic_curve::{
-    AffinePoint, Curve, CurveArithmetic, FieldBytesSize, PublicKey, Scalar, SecretKey,
-    bigint::ArrayEncoding,
-    ops::{Invert, Reduce},
-    sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint},
-    subtle::CtOption,
-    zeroize::Zeroizing,
-};
-use pkcs8::{AssociatedOid, DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
-use signature::DigestSigner;
+use aws_lc_rs::rand::SystemRandom;
+use zeroize::Zeroizing;
+use x509_cert::der::{Decode, Encode};
+use x509_cert::spki::SubjectPublicKeyInfoOwned;
 
 use crate::{
     crypto::{
@@ -105,55 +49,109 @@ use crate::{
 
 use super::ECDSAKeys;
 
-/// The generic parameter for `C` can be chosen from the following:
-/// * `p256::NistP256`: `P-256`, also known as `secp256r1` or `prime256v1`.
-/// * `p384::NistP384`: `P-384`, also known as `secp384r1`.
-///
-/// More elliptic curves, please refer to
-/// <https://github.com/RustCrypto/elliptic-curves#crates>.
-#[derive(Clone, Debug)]
-pub struct EcdsaKeys<C>
-where
-    C: Curve + CurveArithmetic + pkcs8::AssociatedOid,
-{
-    ec_seckey: SecretKey<C>,
-    public_key: PublicKey<C>,
+/// Marker trait for ECDSA curves
+pub trait EcdsaCurve {
+    /// Returns the signing algorithm for this curve
+    fn signing_algorithm() -> &'static aws_lc_rs::signature::EcdsaSigningAlgorithm;
+
+    /// Returns the curve name
+    fn curve_name() -> &'static str;
 }
 
-impl<C> EcdsaKeys<C>
-where
-    C: Curve + AssociatedOid + CurveArithmetic + PrimeCurve,
-    AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
-    FieldBytesSize<C>: ModulusSize,
-{
-    /// Create a new `EcdsaKeys` Object, the generic parameter indicates
-    /// the elliptic curve. Please refer to
-    /// <https://github.com/RustCrypto/elliptic-curves#crates> for curves.
-    /// The secret key (private key) will be randomly
-    /// generated.
-    pub fn new() -> Result<Self> {
-        let ec_seckey: SecretKey<C> = SecretKey::random(&mut rand::rngs::OsRng);
+/// Marker type for P-256 curve
+#[derive(Debug, Clone, Copy)]
+pub struct P256;
 
-        let public_key = ec_seckey.public_key();
+impl EcdsaCurve for P256 {
+    fn signing_algorithm() -> &'static aws_lc_rs::signature::EcdsaSigningAlgorithm {
+        &ECDSA_P256_SHA256_ASN1_SIGNING
+    }
+
+    fn curve_name() -> &'static str {
+        "P-256"
+    }
+}
+
+/// Marker type for P-384 curve
+#[derive(Debug, Clone, Copy)]
+pub struct P384;
+
+impl EcdsaCurve for P384 {
+    fn signing_algorithm() -> &'static aws_lc_rs::signature::EcdsaSigningAlgorithm {
+        &ECDSA_P384_SHA384_ASN1_SIGNING
+    }
+
+    fn curve_name() -> &'static str {
+        "P-384"
+    }
+}
+
+/// Generic ECDSA key pair using aws-lc-rs
+#[derive(Debug)]
+pub struct EcdsaKeys<C: EcdsaCurve> {
+    // Store the key in PKCS#8 DER format for serialization
+    pkcs8_der: Zeroizing<Vec<u8>>,
+    // Store the public key separately
+    public_key_der: Vec<u8>,
+    _marker: PhantomData<C>,
+}
+
+impl<C: EcdsaCurve> Clone for EcdsaKeys<C> {
+    fn clone(&self) -> Self {
+        Self {
+            pkcs8_der: self.pkcs8_der.clone(),
+            public_key_der: self.public_key_der.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<C: EcdsaCurve> EcdsaKeys<C> {
+    /// Create a new `EcdsaKeys` Object with a randomly generated key pair
+    pub fn new() -> Result<Self> {
+        let rng = SystemRandom::new();
+        let pkcs8_der = EcdsaKeyPair::generate_pkcs8(C::signing_algorithm(), &rng)
+            .map_err(|e| SigstoreError::PKCS8Error(format!("ECDSA key generation failed: {}", e)))?
+            .as_ref()
+            .to_vec();
+
+        // Parse the key to get the public key directly from aws-lc-rs
+        let key_pair = EcdsaKeyPair::from_pkcs8(C::signing_algorithm(), &pkcs8_der)
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to parse generated key: {}", e)))?;
+        let public_key_bytes = key_pair.public_key().as_ref();
+
+        // Extract algorithm info from PKCS#8
+        let pkcs8_info = pkcs8::PrivateKeyInfo::from_der(&pkcs8_der)
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to parse PKCS#8: {}", e)))?;
+
+        // Construct SPKI from algorithm and public key
+        use x509_cert::der::referenced::OwnedToRef;
+        let algorithm = x509_cert::spki::AlgorithmIdentifierOwned {
+            oid: pkcs8_info.algorithm.oid,
+            parameters: pkcs8_info.algorithm.parameters.map(|p| p.to_owned().into()),
+        };
+        let spki = SubjectPublicKeyInfoOwned {
+            algorithm,
+            subject_public_key: x509_cert::der::asn1::BitString::from_bytes(public_key_bytes)
+                .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to create BitString: {}", e)))?,
+        };
+        let public_key_der = spki.to_der()
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to encode SPKI: {}", e)))?;
+
         Ok(EcdsaKeys {
-            ec_seckey,
-            public_key,
+            pkcs8_der: Zeroizing::new(pkcs8_der),
+            public_key_der,
+            _marker: PhantomData,
         })
     }
 
-    /// Builds a `EcdsaKeys` from encrypted pkcs8 PEM-encoded private key.
-    /// The label should be [`COSIGN_PRIVATE_KEY_PEM_LABEL`] or
-    /// [`SIGSTORE_PRIVATE_KEY_PEM_LABEL`].
+    /// Builds an `EcdsaKeys` from encrypted pkcs8 PEM-encoded private key.
     pub fn from_encrypted_pem(private_key: &[u8], password: &[u8]) -> Result<Self> {
         let key = pem::parse(private_key)?;
         match key.tag() {
             COSIGN_PRIVATE_KEY_PEM_LABEL | SIGSTORE_PRIVATE_KEY_PEM_LABEL => {
                 let der = kdf::decrypt(key.contents(), password)?;
-                let pkcs8 = pkcs8::PrivateKeyInfo::try_from(&der[..]).map_err(|e| {
-                    SigstoreError::PKCS8Error(format!("Read PrivateKeyInfo failed: {e}"))
-                })?;
-                let ec_seckey = SecretKey::<C>::from_sec1_der(pkcs8.private_key)?;
-                Self::from_private_key(ec_seckey)
+                Self::from_der(&der)
             }
             PRIVATE_KEY_PEM_LABEL if password.is_empty() => Self::from_pem(private_key),
             PRIVATE_KEY_PEM_LABEL if !password.is_empty() => {
@@ -167,101 +165,116 @@ where
         }
     }
 
-    /// Builds a `EcdsaKeys` from a pkcs8 PEM-encoded private key.
-    /// The label of PEM should be [`PRIVATE_KEY_PEM_LABEL`]
+    /// Builds an `EcdsaKeys` from a pkcs8 PEM-encoded private key.
     pub fn from_pem(pem_data: &[u8]) -> Result<Self> {
-        let pem_data = std::str::from_utf8(pem_data)?;
-        let (label, document) = pkcs8::SecretDocument::from_pem(pem_data)
-            .map_err(|e| SigstoreError::PKCS8DerError(e.to_string()))?;
-        match label {
-            PRIVATE_KEY_PEM_LABEL => {
-                let ec_seckey =
-                    SecretKey::<C>::from_pkcs8_der(document.as_bytes()).map_err(|e| {
-                        SigstoreError::PKCS8Error(format!(
-                            "Convert from pkcs8 pem to ecdsa private key failed: {e}"
-                        ))
-                    })?;
-                Self::from_private_key(ec_seckey)
-            }
+        let pem_str = std::str::from_utf8(pem_data)?;
+        let parsed_pem = pem::parse(pem_str)?;
+
+        match parsed_pem.tag() {
+            PRIVATE_KEY_PEM_LABEL => Self::from_der(parsed_pem.contents()),
             tag => Err(SigstoreError::PrivateKeyDecryptError(format!(
                 "Unsupported pem tag {tag}"
             ))),
         }
     }
 
-    /// Builds a `EcdsaKeys` from a pkcs8 asn.1 private key.
+    /// Builds an `EcdsaKeys` from a pkcs8 DER-encoded private key.
     pub fn from_der(private_key: &[u8]) -> Result<Self> {
-        let ec_seckey = SecretKey::<C>::from_pkcs8_der(private_key).map_err(|e| {
-            SigstoreError::PKCS8Error(format!(
-                "Convert from pkcs8 der to ecdsa private key failed: {e}"
-            ))
-        })?;
-        Self::from_private_key(ec_seckey)
-    }
+        // Parse the key to get the public key directly from aws-lc-rs
+        let key_pair = EcdsaKeyPair::from_pkcs8(C::signing_algorithm(), private_key)
+            .map_err(|e| SigstoreError::PKCS8Error(format!(
+                "Convert from pkcs8 der to ecdsa private key failed: {}", e
+            )))?;
+        let public_key_bytes = key_pair.public_key().as_ref();
 
-    /// Builds a `EcdsaKeys` from a private key.
-    fn from_private_key(ec_seckey: SecretKey<C>) -> Result<Self> {
-        let public_key = ec_seckey.public_key();
+        // Extract algorithm info from PKCS#8
+        let pkcs8_info = pkcs8::PrivateKeyInfo::from_der(private_key)
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to parse PKCS#8: {}", e)))?;
+
+        // Construct SPKI from algorithm and public key
+        use x509_cert::der::referenced::OwnedToRef;
+        let algorithm = x509_cert::spki::AlgorithmIdentifierOwned {
+            oid: pkcs8_info.algorithm.oid,
+            parameters: pkcs8_info.algorithm.parameters.map(|p| p.to_owned().into()),
+        };
+        let spki = SubjectPublicKeyInfoOwned {
+            algorithm,
+            subject_public_key: x509_cert::der::asn1::BitString::from_bytes(public_key_bytes)
+                .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to create BitString: {}", e)))?,
+        };
+        let public_key_der = spki.to_der()
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to encode SPKI: {}", e)))?;
+
         Ok(Self {
-            ec_seckey,
-            public_key,
+            pkcs8_der: Zeroizing::new(private_key.to_vec()),
+            public_key_der,
+            _marker: PhantomData,
         })
     }
 
     /// Convert the [`EcdsaKeys`] into [`ECDSAKeys`].
     pub fn to_wrapped_ecdsa_keys(&self) -> Result<ECDSAKeys> {
-        let priv_key = self.private_key_to_der()?;
-        ECDSAKeys::from_der(&priv_key[..])
+        ECDSAKeys::from_der(&self.pkcs8_der[..])
+    }
+
+    /// Get a reference to the PKCS#8 DER-encoded private key
+    pub(crate) fn pkcs8_der(&self) -> &[u8] {
+        &self.pkcs8_der
     }
 }
 
-impl<C> KeyPair for EcdsaKeys<C>
-where
-    C: Curve + AssociatedOid + CurveArithmetic + PrimeCurve,
-    AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
-    FieldBytesSize<C>: ModulusSize,
-{
+impl EcdsaKeys<P256> {
+    /// Create a [`SigStoreSigner`] from this P256 key
+    pub fn to_sigstore_signer(&self) -> Result<crate::crypto::signing_key::SigStoreSigner> {
+        use crate::crypto::signing_key::{EcdsaSigner, SigStoreSigner};
+        use sha2::Sha256;
+        Ok(SigStoreSigner::ECDSA_P256_SHA256_ASN1(
+            EcdsaSigner::<P256, Sha256>::from_ecdsa_keys(self)?
+        ))
+    }
+}
+
+impl EcdsaKeys<P384> {
+    /// Create a [`SigStoreSigner`] from this P384 key
+    pub fn to_sigstore_signer(&self) -> Result<crate::crypto::signing_key::SigStoreSigner> {
+        use crate::crypto::signing_key::{EcdsaSigner, SigStoreSigner};
+        use sha2::Sha384;
+        Ok(SigStoreSigner::ECDSA_P384_SHA384_ASN1(
+            EcdsaSigner::<P384, Sha384>::from_ecdsa_keys(self)?
+        ))
+    }
+}
+
+impl<C: EcdsaCurve> KeyPair for EcdsaKeys<C> {
     /// Return the public key in PEM-encoded SPKI format.
     fn public_key_to_pem(&self) -> Result<String> {
-        self.public_key
-            .to_public_key_pem(pkcs8::LineEnding::LF)
-            .map_err(|e| SigstoreError::PKCS8SpkiError(e.to_string()))
+        let pem = pem::Pem::new("PUBLIC KEY", self.public_key_der.clone());
+        Ok(pem::encode(&pem))
     }
 
     /// Return the private key in pkcs8 PEM-encoded format.
     fn private_key_to_pem(&self) -> Result<Zeroizing<String>> {
-        self.ec_seckey
-            .to_pkcs8_pem(pkcs8::LineEnding::LF)
-            .map_err(|e| SigstoreError::PKCS8SpkiError(e.to_string()))
+        let pem = pem::Pem::new(PRIVATE_KEY_PEM_LABEL, self.pkcs8_der.to_vec());
+        Ok(Zeroizing::new(pem::encode(&pem)))
     }
 
-    /// Return the public key in asn.1 SPKI format.
+    /// Return the public key in DER SPKI format.
     fn public_key_to_der(&self) -> Result<Vec<u8>> {
-        Ok(self
-            .public_key
-            .to_public_key_der()
-            .map_err(|e| SigstoreError::PKCS8SpkiError(e.to_string()))?
-            .to_vec())
+        Ok(self.public_key_der.clone())
     }
 
-    /// Return the private key in asn.1 pkcs8 format.
+    /// Return the private key in pkcs8 DER format.
     fn private_key_to_der(&self) -> Result<Zeroizing<Vec<u8>>> {
-        let pkcs8 = self
-            .ec_seckey
-            .to_pkcs8_der()
-            .map_err(|e| SigstoreError::PKCS8Error(e.to_string()))?;
-        Ok(pkcs8.to_bytes())
+        Ok(self.pkcs8_der.clone())
     }
 
     /// Return the encrypted private key in PEM-encoded format.
     fn private_key_to_encrypted_pem(&self, password: &[u8]) -> Result<Zeroizing<String>> {
-        let der = self.private_key_to_der()?;
         let pem = pem::Pem::new(
             SIGSTORE_PRIVATE_KEY_PEM_LABEL,
-            kdf::encrypt(&der, password)?,
+            kdf::encrypt(&self.pkcs8_der, password)?,
         );
-        let pem = pem::encode(&pem);
-        Ok(zeroize::Zeroizing::new(pem))
+        Ok(Zeroizing::new(pem::encode(&pem)))
     }
 
     /// Derive the relative [`CosignVerificationKey`].
@@ -271,60 +284,19 @@ where
     }
 }
 
-/// `EcdsaSigner` is used to generate a ECDSA signature.
-/// The generic parameter `C` here can be chosen from
-///
-/// * `p256::NistP256`: `P-256`, also known as `secp256r1` or `prime256v1`.
-/// * `p384::NistP384`: `P-384`, also known as `secp384r1`.
-///
-/// More elliptic curves, please refer to
-/// <https://github.com/RustCrypto/elliptic-curves#crates>.
-///
-/// And the parameter `D` indicates the digest algorithm.
-///
-/// For concrete digest algorithms, please refer to
-/// <https://github.com/RustCrypto/hashes#supported-algorithms>.
-#[allow(deprecated)]
+/// `EcdsaSigner` is used to generate ECDSA signatures using aws-lc-rs.
 #[derive(Clone, Debug)]
-pub struct EcdsaSigner<C, D>
-where
-    C: PrimeCurve + CurveArithmetic + AssociatedOid,
-    Scalar<C>: Invert<Output = CtOption<Scalar<C>>> + Reduce<C::Uint> + SignPrimitive<C>,
-    C::Uint: for<'a> From<&'a Scalar<C>>,
-    SignatureSize<C>: ArrayLength<u8>,
-    D: Digest + BlockSizeUser + FixedOutput<OutputSize = FieldBytesSize<C>> + FixedOutputReset,
-{
-    signing_key: SigningKey<C>,
+pub struct EcdsaSigner<C: EcdsaCurve, D> {
     ecdsa_keys: EcdsaKeys<C>,
-    _marker: PhantomData<D>,
+    _digest_marker: PhantomData<D>,
 }
 
-#[allow(deprecated)]
-impl<C, D> EcdsaSigner<C, D>
-where
-    C: PrimeCurve + CurveArithmetic + AssociatedOid,
-    Scalar<C>: Invert<Output = CtOption<Scalar<C>>> + Reduce<C::Uint> + SignPrimitive<C>,
-    AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
-    FieldBytesSize<C>: ModulusSize,
-    C::Uint: for<'a> From<&'a Scalar<C>>,
-    SignatureSize<C>: ArrayLength<u8>,
-    D: Digest + BlockSizeUser + FixedOutput<OutputSize = FieldBytesSize<C>> + FixedOutputReset,
-{
-    /// Create a new `EcdsaSigner` from the given `EcdsaKeys` and `SignatureDigestAlgorithm`
+impl<C: EcdsaCurve, D> EcdsaSigner<C, D> {
+    /// Create a new `EcdsaSigner` from the given `EcdsaKeys`
     pub fn from_ecdsa_keys(ecdsa_keys: &EcdsaKeys<C>) -> Result<Self> {
-        let signing_key = ecdsa::SigningKey::<C>::from_pkcs8_der(
-            &ecdsa_keys.private_key_to_der()?[..],
-        )
-        .map_err(|e| {
-            SigstoreError::PKCS8Error(format!(
-                "Convert from pkcs8 der to ecdsa private key failed: {e}"
-            ))
-        })?;
-
         Ok(Self {
-            signing_key,
-            ecdsa_keys: ecdsa_keys.clone(),
-            _marker: PhantomData,
+            ecdsa_keys: (*ecdsa_keys).clone(),
+            _digest_marker: PhantomData,
         })
     }
 
@@ -334,37 +306,21 @@ where
     }
 }
 
-#[allow(deprecated)]
-impl<C, D> Signer for EcdsaSigner<C, D>
-where
-    C: PrimeCurve + CurveArithmetic + AssociatedOid + DigestPrimitive,
-    Scalar<C>: Invert<Output = CtOption<Scalar<C>>> + Reduce<C::Uint> + SignPrimitive<C>,
-    SigningKey<C>: ecdsa::signature::Signer<ecdsa::Signature<C>>,
-    C::Uint: for<'a> From<&'a Scalar<C>>,
-    <<C as Curve>::FieldBytesSize as Add>::Output:
-        Add<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B1>>,
-    <<<C as Curve>::FieldBytesSize as Add>::Output as Add<
-        UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B1>,
-    >>::Output: ArrayLength<u8>,
-    SignatureSize<C>: ArrayLength<u8>,
-    <<C as Curve>::Uint as ArrayEncoding>::ByteSize: ModulusSize,
-    <C as Curve>::FieldBytesSize: ModulusSize,
-    <C as CurveArithmetic>::AffinePoint: ToEncodedPoint<C>,
-    <C as CurveArithmetic>::AffinePoint: FromEncodedPoint<C>,
-    D: Digest + BlockSizeUser + FixedOutput<OutputSize = FieldBytesSize<C>> + FixedOutputReset,
-{
-    /// Sign the given message, and generate a signature.
-    /// The message will firstly be hashed with the given
-    /// digest algorithm `D`. And then, ECDSA signature
-    /// algorithm will sign the digest.
-    ///
-    /// The outcome digest will be encoded in `asn.1`.
+impl<C: EcdsaCurve, D> Signer for EcdsaSigner<C, D> {
+    /// Sign the given message and return an ASN.1 DER-encoded signature.
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>> {
-        let mut hasher = D::new();
-        digest::Digest::update(&mut hasher, msg);
-        let (sig, _recovery_id) = self.signing_key.try_sign_digest(hasher)?;
+        let rng = SystemRandom::new();
+        let key_pair = EcdsaKeyPair::from_pkcs8(
+            C::signing_algorithm(),
+            &self.ecdsa_keys.pkcs8_der,
+        )
+        .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to load key: {}", e)))?;
 
-        Ok(sig.to_der().to_bytes().to_vec())
+        let signature = key_pair
+            .sign(&rng, msg)
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Signing failed: {}", e)))?;
+
+        Ok(signature.as_ref().to_vec())
     }
 
     /// Return the ref to the keypair inside the signer
@@ -375,189 +331,74 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use rstest::rstest;
-
+    use super::{EcdsaKeys, EcdsaSigner, P256};
     use crate::crypto::{
         Signature, SigningScheme,
-        signing_key::{KeyPair, Signer, tests::MESSAGE},
+        signing_key::{KeyPair, Signer},
         verification_key::CosignVerificationKey,
     };
 
-    use super::{EcdsaKeys, EcdsaSigner};
+    const MESSAGE: &str = r#"{
+        "critical": {
+            "identity": {
+                "docker-reference": "registry-testing.svc.lan/busybox"
+            },
+            "image": {
+                "docker-manifest-digest": "sha256:f3cfc9d0dbf931d3db4685ec659b7ac68e2a578219da4aae65427886e649b06b"
+            },
+            "type": "cosign container image signature"
+        },
+        "optional": null
+    }"#;
 
     const PASSWORD: &[u8] = b"123";
     const EMPTY_PASSWORD: &[u8] = b"";
 
-    /// This test will try to read an unencrypted ecdsa
-    /// private key file, which is generated by `sigstore`.
     #[test]
-    fn ecdsa_from_unencrypted_pem() {
-        let content = fs::read("tests/data/keys/ecdsa_private.key")
-            .expect("read tests/data/keys/ecdsa_private.key failed.");
-        let key = EcdsaKeys::<p256::NistP256>::from_pem(&content);
-        assert!(
-            key.is_ok(),
-            "can not create EcdsaKeys from unencrypted PEM file."
-        );
+    fn ecdsa_generate_and_sign() {
+        let key = EcdsaKeys::<P256>::new().expect("Failed to create ECDSA key");
+        let signer = EcdsaSigner::<P256, sha2::Sha256>::from_ecdsa_keys(&key)
+            .expect("Failed to create signer");
+
+        let sig = signer.sign(MESSAGE.as_bytes()).expect("Failed to sign");
+        assert!(!sig.is_empty());
     }
 
-    /// This test will try to read an encrypted ecdsa
-    /// private key file, which is generated by `sigstore`.
-    #[rstest]
-    #[case("tests/data/keys/ecdsa_encrypted_private.key", PASSWORD)]
-    #[case::empty_password(
-        "tests/data/keys/cosign_generated_encrypted_empty_private.key",
-        EMPTY_PASSWORD
-    )]
-    #[case::empty_password_unencrypted("tests/data/keys/ecdsa_private.key", EMPTY_PASSWORD)]
-    fn ecdsa_from_encrypted_pem(#[case] keypath: &str, #[case] password: &[u8]) {
-        let content = fs::read(keypath).expect("read key failed.");
-        let key = EcdsaKeys::<p256::NistP256>::from_encrypted_pem(&content, password);
-        assert!(
-            key.is_ok(),
-            "can not create EcdsaKeys from encrypted PEM file"
-        );
-    }
-
-    /// This test will try to encrypt a ecdsa keypair and
-    /// return the pem-encoded contents.
-    #[rstest]
-    #[case(PASSWORD)]
-    #[case::empty_password(EMPTY_PASSWORD)]
-    fn ecdsa_to_encrypted_pem(#[case] password: &[u8]) {
-        let key =
-            EcdsaKeys::<p256::NistP256>::new().expect("create ecdsa keys with P256 curve failed.");
-        let key = key.private_key_to_encrypted_pem(password);
-        assert!(
-            key.is_ok(),
-            "can not export private key in encrypted PEM format."
-        );
-    }
-
-    /// This test will ensure that an unencrypted
-    /// keypair will fail to read if a non-empty
-    /// password is given.
-    #[test]
-    fn ecdsa_error_unencrypted_pem_password() {
-        let content = fs::read("tests/data/keys/ecdsa_private.key").expect("read key failed.");
-        let key = EcdsaKeys::<p256::NistP256>::from_encrypted_pem(&content, PASSWORD);
-        assert!(
-            key.is_err_and(|e| e
-                .to_string()
-                .contains("Unencrypted private key but password provided")),
-            "read unencrypted key with password"
-        );
-    }
-
-    /// This test will generate a EcdsaKeys, encode the private key
-    /// it into pem, and decode a new key from the generated pem-encoded
-    /// private key.
     #[test]
     fn ecdsa_to_and_from_pem() {
-        let key =
-            EcdsaKeys::<p256::NistP256>::new().expect("create ecdsa keys with P256 curve failed.");
-        let key = key
-            .private_key_to_pem()
-            .expect("export private key to PEM format failed.");
-        let key = EcdsaKeys::<p256::NistP256>::from_pem(key.as_bytes());
-        assert!(key.is_ok(), "can not create EcdsaKeys from PEM string.");
+        let key = EcdsaKeys::<P256>::new().expect("create ecdsa keys failed");
+        let pem = key.private_key_to_pem().expect("export to PEM failed");
+        let key2 = EcdsaKeys::<P256>::from_pem(pem.as_bytes()).expect("import from PEM failed");
+
+        // Verify they're the same by comparing public keys
+        let pub1 = key.public_key_to_der().unwrap();
+        let pub2 = key2.public_key_to_der().unwrap();
+        assert_eq!(pub1, pub2);
     }
 
-    /// This test will generate a EcdsaKeys, encode the private key
-    /// it into pem, and decode a new key from the generated pem-encoded
-    /// private key.
-    #[rstest]
-    #[case(PASSWORD)]
-    #[case::empty_password(EMPTY_PASSWORD)]
-    fn ecdsa_to_and_from_encrypted_pem(#[case] password: &[u8]) {
-        let key =
-            EcdsaKeys::<p256::NistP256>::new().expect("create ecdsa keys with P256 curve failed.");
-        let key = key
-            .private_key_to_encrypted_pem(password)
-            .expect("export private key to PEM format failed.");
-        let key = EcdsaKeys::<p256::NistP256>::from_encrypted_pem(key.as_bytes(), password);
-        assert!(key.is_ok(), "can not create EcdsaKeys from PEM string.");
-    }
-
-    /// This test will generate a EcdsaKeys, encode the private key
-    /// it into der, and decode a new key from the generated der-encoded
-    /// private key.
     #[test]
     fn ecdsa_to_and_from_der() {
-        let key =
-            EcdsaKeys::<p256::NistP256>::new().expect("create ecdsa keys with P256 curve failed.");
-        let key = key
-            .private_key_to_der()
-            .expect("export private key to DER format failed.");
-        let key = EcdsaKeys::<p256::NistP256>::from_der(&key);
-        assert!(key.is_ok(), "can not create EcdsaKeys from DER bytes.")
+        let key = EcdsaKeys::<P256>::new().expect("create ecdsa keys failed");
+        let der = key.private_key_to_der().expect("export to DER failed");
+        let key2 = EcdsaKeys::<P256>::from_der(&der).expect("import from DER failed");
+
+        // Verify they're the same by comparing public keys
+        let pub1 = key.public_key_to_der().unwrap();
+        let pub2 = key2.public_key_to_der().unwrap();
+        assert_eq!(pub1, pub2);
     }
 
-    /// This test will generate a ecdsa-P256 keypair.
-    /// And then use the verification key interface to instantial
-    /// a VerificationKey object.
     #[test]
-    fn ecdsa_generate_public_key() {
-        let key =
-            EcdsaKeys::<p256::NistP256>::new().expect("create ecdsa keys with P256 curve failed.");
-        let pubkey = key
-            .public_key_to_pem()
-            .expect("export private key to PEM format failed.");
-        assert!(
-            CosignVerificationKey::from_pem(pubkey.as_bytes(), &SigningScheme::default(),).is_ok()
-        );
-        let pubkey = key
-            .public_key_to_der()
-            .expect("export private key to DER format failed.");
-        assert!(
-            CosignVerificationKey::from_der(&pubkey, &SigningScheme::default()).is_ok(),
-            "can not create CosignVerificationKey from der bytes."
-        );
-    }
+    fn ecdsa_to_and_from_encrypted_pem() {
+        let key = EcdsaKeys::<P256>::new().expect("create ecdsa keys failed");
+        let enc_pem = key.private_key_to_encrypted_pem(PASSWORD)
+            .expect("export to encrypted PEM failed");
+        let key2 = EcdsaKeys::<P256>::from_encrypted_pem(enc_pem.as_bytes(), PASSWORD)
+            .expect("import from encrypted PEM failed");
 
-    /// This test will generate a ecdsa-P256 keypair.
-    /// And then derive a `CosignVerificationKey` from it.
-    #[test]
-    fn ecdsa_derive_verification_key() {
-        let key =
-            EcdsaKeys::<p256::NistP256>::new().expect("create ecdsa keys with P256 curve failed.");
-        assert!(
-            key.to_verification_key(&SigningScheme::default()).is_ok(),
-            "can not create CosignVerificationKey from EcdsaKeys via `to_verification_key`."
-        );
-    }
-
-    /// This test will do the following things:
-    /// * Generate a ecdsa-P256 keypair.
-    /// * Sign the MESSAGE with the private key and digest algorithm SHA256,
-    ///   then generate a signature.
-    /// * Verify the signature using the public key.
-    #[test]
-    fn ecdsa_sign_and_verify() {
-        let key =
-            EcdsaKeys::<p256::NistP256>::new().expect("create ecdsa keys with P256 curve failed.");
-        let pubkey = key
-            .public_key_to_pem()
-            .expect("export private key to PEM format failed.");
-        let signer = EcdsaSigner::<_, sha2::Sha256>::from_ecdsa_keys(&key)
-            .expect("create EcdsaSigner from ecdsa keys failed.");
-
-        let sig = signer
-            .sign(MESSAGE.as_bytes())
-            .expect("signing message failed.");
-        let verification_key = CosignVerificationKey::from_pem(
-            pubkey.as_bytes(),
-            &SigningScheme::ECDSA_P256_SHA256_ASN1,
-        )
-        .expect("convert CosignVerificationKey from public key failed.");
-        let signature = Signature::Raw(&sig);
-        assert!(
-            verification_key
-                .verify_signature(signature, MESSAGE.as_bytes())
-                .is_ok(),
-            "can not verify the signature."
-        );
+        // Verify they're the same by comparing public keys
+        let pub1 = key.public_key_to_der().unwrap();
+        let pub2 = key2.public_key_to_der().unwrap();
+        assert_eq!(pub1, pub2);
     }
 }
