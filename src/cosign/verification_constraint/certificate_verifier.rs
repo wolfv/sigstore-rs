@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use pkcs8::der::Decode;
+use x509_cert::der::Decode;
 use pki_types::CertificateDer;
 use tracing::warn;
 use x509_cert::Certificate;

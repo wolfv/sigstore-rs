@@ -25,9 +25,9 @@
 use std::marker::PhantomData;
 
 use aws_lc_rs::signature::{
-    EcdsaKeyPair, EcdsaSigningAlgorithm, EcdsaVerificationAlgorithm,
-    KeyPair as AwsKeyPair, UnparsedPublicKey, ECDSA_P256_SHA256_ASN1,
-    ECDSA_P256_SHA256_ASN1_SIGNING, ECDSA_P384_SHA384_ASN1,
+    EcdsaKeyPair,
+    KeyPair as AwsKeyPair,
+    ECDSA_P256_SHA256_ASN1_SIGNING,
     ECDSA_P384_SHA384_ASN1_SIGNING,
 };
 use aws_lc_rs::rand::SystemRandom;
@@ -50,10 +50,7 @@ use super::ECDSAKeys;
 /// Marker trait for ECDSA curves
 pub trait EcdsaCurve {
     /// Returns the signing algorithm for this curve
-    fn signing_algorithm() -> &'static EcdsaSigningAlgorithm;
-
-    /// Returns the verification algorithm for this curve
-    fn verification_algorithm() -> &'static EcdsaVerificationAlgorithm;
+    fn signing_algorithm() -> &'static aws_lc_rs::signature::EcdsaSigningAlgorithm;
 
     /// Returns the curve name
     fn curve_name() -> &'static str;
@@ -63,12 +60,8 @@ pub trait EcdsaCurve {
 pub struct P256;
 
 impl EcdsaCurve for P256 {
-    fn signing_algorithm() -> &'static EcdsaSigningAlgorithm {
+    fn signing_algorithm() -> &'static aws_lc_rs::signature::EcdsaSigningAlgorithm {
         &ECDSA_P256_SHA256_ASN1_SIGNING
-    }
-
-    fn verification_algorithm() -> &'static EcdsaVerificationAlgorithm {
-        &ECDSA_P256_SHA256_ASN1
     }
 
     fn curve_name() -> &'static str {
@@ -80,12 +73,8 @@ impl EcdsaCurve for P256 {
 pub struct P384;
 
 impl EcdsaCurve for P384 {
-    fn signing_algorithm() -> &'static EcdsaSigningAlgorithm {
+    fn signing_algorithm() -> &'static aws_lc_rs::signature::EcdsaSigningAlgorithm {
         &ECDSA_P384_SHA384_ASN1_SIGNING
-    }
-
-    fn verification_algorithm() -> &'static EcdsaVerificationAlgorithm {
-        &ECDSA_P384_SHA384_ASN1
     }
 
     fn curve_name() -> &'static str {
@@ -182,6 +171,28 @@ impl<C: EcdsaCurve> EcdsaKeys<C> {
     /// Get a reference to the PKCS#8 DER-encoded private key
     pub(crate) fn pkcs8_der(&self) -> &[u8] {
         &self.pkcs8_der
+    }
+}
+
+impl EcdsaKeys<P256> {
+    /// Create a [`SigStoreSigner`] from this P256 key
+    pub fn to_sigstore_signer(&self) -> Result<crate::crypto::signing_key::SigStoreSigner> {
+        use crate::crypto::signing_key::{EcdsaSigner, SigStoreSigner};
+        use sha2::Sha256;
+        Ok(SigStoreSigner::ECDSA_P256_SHA256_ASN1(
+            EcdsaSigner::<P256, Sha256>::from_ecdsa_keys(self)?
+        ))
+    }
+}
+
+impl EcdsaKeys<P384> {
+    /// Create a [`SigStoreSigner`] from this P384 key
+    pub fn to_sigstore_signer(&self) -> Result<crate::crypto::signing_key::SigStoreSigner> {
+        use crate::crypto::signing_key::{EcdsaSigner, SigStoreSigner};
+        use sha2::Sha384;
+        Ok(SigStoreSigner::ECDSA_P384_SHA384_ASN1(
+            EcdsaSigner::<P384, Sha384>::from_ecdsa_keys(self)?
+        ))
     }
 }
 

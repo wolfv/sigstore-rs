@@ -17,11 +17,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STD_ENGINE
 use const_oid::db::rfc5912::{ID_EC_PUBLIC_KEY, RSA_ENCRYPTION};
 use aws_lc_rs::signature::{
     UnparsedPublicKey, ECDSA_P256_SHA256_ASN1, ECDSA_P384_SHA384_ASN1,
-    RSA_PKCS1_SHA256, RSA_PKCS1_SHA384, RSA_PKCS1_SHA512,
-    RSA_PSS_SHA256, RSA_PSS_SHA384, RSA_PSS_SHA512,
+    RSA_PKCS1_2048_8192_SHA256, RSA_PKCS1_2048_8192_SHA384, RSA_PKCS1_2048_8192_SHA512,
+    RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512,
     ED25519,
 };
-use x509_cert::{der::referenced::OwnedToRef, spki::SubjectPublicKeyInfoOwned};
+use x509_cert::{der::{Encode, referenced::OwnedToRef}, spki::SubjectPublicKeyInfoOwned};
 
 use super::{
     Signature, SigningScheme,
@@ -225,37 +225,37 @@ impl CosignVerificationKey {
 
         match self {
             CosignVerificationKey::RSA_PSS_SHA256(key) => {
-                let public_key = UnparsedPublicKey::new(&RSA_PSS_SHA256, key);
+                let public_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, key);
                 public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
             CosignVerificationKey::RSA_PSS_SHA384(key) => {
-                let public_key = UnparsedPublicKey::new(&RSA_PSS_SHA384, key);
+                let public_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, key);
                 public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
             CosignVerificationKey::RSA_PSS_SHA512(key) => {
-                let public_key = UnparsedPublicKey::new(&RSA_PSS_SHA512, key);
+                let public_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, key);
                 public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
             CosignVerificationKey::RSA_PKCS1_SHA256(key) => {
-                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_SHA256, key);
+                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key);
                 public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
             CosignVerificationKey::RSA_PKCS1_SHA384(key) => {
-                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_SHA384, key);
+                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA384, key);
                 public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
             CosignVerificationKey::RSA_PKCS1_SHA512(key) => {
-                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_SHA512, key);
+                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA512, key);
                 public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
@@ -297,37 +297,37 @@ impl CosignVerificationKey {
 
         match self {
             CosignVerificationKey::RSA_PSS_SHA256(key) => {
-                let public_key = UnparsedPublicKey::new(&RSA_PSS_SHA256, key);
+                let public_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, key);
                 public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
             CosignVerificationKey::RSA_PSS_SHA384(key) => {
-                let public_key = UnparsedPublicKey::new(&RSA_PSS_SHA384, key);
+                let public_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA384, key);
                 public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
             CosignVerificationKey::RSA_PSS_SHA512(key) => {
-                let public_key = UnparsedPublicKey::new(&RSA_PSS_SHA512, key);
+                let public_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA512, key);
                 public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
             CosignVerificationKey::RSA_PKCS1_SHA256(key) => {
-                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_SHA256, key);
+                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key);
                 public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
             CosignVerificationKey::RSA_PKCS1_SHA384(key) => {
-                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_SHA384, key);
+                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA384, key);
                 public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)
             }
             CosignVerificationKey::RSA_PKCS1_SHA512(key) => {
-                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_SHA512, key);
+                let public_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA512, key);
                 public_key
                     .verify(msg, &sig)
                     .map_err(|_| SigstoreError::PublicKeyVerificationError)

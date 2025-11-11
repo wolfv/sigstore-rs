@@ -19,7 +19,7 @@
 //! using the aws-lc-rs cryptographic library instead of RustCrypto.
 
 use aws_lc_rs::signature::{
-    Ed25519KeyPair, KeyPair as AwsKeyPair, ED25519, ED25519_PUBLIC_KEY_LEN,
+    Ed25519KeyPair, KeyPair as AwsKeyPair,
 };
 use aws_lc_rs::rand::SystemRandom;
 use zeroize::Zeroizing;

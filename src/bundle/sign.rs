@@ -21,10 +21,9 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as base64};
 use hex;
-use p256::NistP256;
-use pkcs8::der::{Encode, EncodePem};
+use x509_cert::der::{Encode, EncodePem};
 use sha2::{Digest, Sha256};
-use signature::DigestSigner;
+use signature;
 use sigstore_protobuf_specs::dev::sigstore::bundle::v1::bundle;
 use sigstore_protobuf_specs::dev::sigstore::bundle::v1::{
     Bundle, VerificationMaterial, verification_material,
@@ -43,6 +42,8 @@ use x509_cert::ext::pkix as x509_ext;
 use crate::bundle::models::Version;
 use crate::crypto::keyring::Keyring;
 use crate::crypto::transparency::{CertificateEmbeddedSCT, verify_sct};
+use crate::crypto::signing_key::ecdsa::ec::{EcdsaKeys, P256};
+use crate::crypto::signing_key::{KeyPair as _, Signer as _};
 use crate::errors::{Result as SigstoreResult, SigstoreError};
 use crate::fulcio::oauth::OauthTokenProvider;
 use crate::fulcio::{self, FULCIO_ROOT, FulcioClient};
@@ -55,6 +56,84 @@ use crate::trust::TrustRoot;
 #[cfg(feature = "sigstore-trust-root")]
 use crate::trust::sigstore::SigstoreTrustRoot;
 
+// Helper struct to wrap the public key for x509_cert CSR building
+#[derive(Clone)]
+struct P256PublicKey {
+    bytes: Vec<u8>,
+}
+
+impl pkcs8::EncodePublicKey for P256PublicKey {
+    fn to_public_key_der(&self) -> pkcs8::spki::Result<pkcs8::Document> {
+        // The bytes are already in the correct SubjectPublicKeyInfo DER format
+        pkcs8::Document::from_der(&self.bytes)
+    }
+}
+
+// Wrapper for aws_lc_rs signature to implement SignatureBitStringEncoding
+struct P256Signature(Vec<u8>);
+
+impl pkcs8::spki::SignatureBitStringEncoding for P256Signature {
+    fn to_bitstring(&self) -> pkcs8::der::Result<pkcs8::der::asn1::BitString> {
+        pkcs8::der::asn1::BitString::from_bytes(&self.0)
+    }
+}
+
+// Helper struct to wrap aws-lc-rs EcdsaKeyPair for x509_cert CSR building
+struct CsrSigner<'a> {
+    key_pair: &'a aws_lc_rs::signature::EcdsaKeyPair,
+    public_key: P256PublicKey,
+}
+
+impl<'a> CsrSigner<'a> {
+    fn new(key_pair: &'a aws_lc_rs::signature::EcdsaKeyPair) -> Self {
+        Self {
+            public_key: P256PublicKey {
+                bytes: key_pair.public_key().as_ref().to_vec(),
+            },
+            key_pair,
+        }
+    }
+}
+
+impl<'a> signature::Keypair for CsrSigner<'a> {
+    type VerifyingKey = P256PublicKey;
+    fn verifying_key(&self) -> Self::VerifyingKey {
+        self.public_key.clone()
+    }
+}
+
+impl<'a> signature::Signer<P256Signature> for CsrSigner<'a> {
+    fn try_sign(&self, msg: &[u8]) -> Result<P256Signature, signature::Error> {
+        use aws_lc_rs::rand::SystemRandom;
+
+        let rng = SystemRandom::new();
+        let sig = self.key_pair
+            .sign(&rng, msg)
+            .map_err(|_| signature::Error::new())?;
+        Ok(P256Signature(sig.as_ref().to_vec()))
+    }
+}
+
+impl<'a> x509_cert::spki::AssociatedAlgorithmIdentifier for CsrSigner<'a> {
+    type Params = x509_cert::der::asn1::ObjectIdentifier;
+
+    const ALGORITHM_IDENTIFIER: x509_cert::spki::AlgorithmIdentifier<Self::Params> =
+        x509_cert::spki::AlgorithmIdentifier {
+            oid: const_oid::db::rfc5912::ID_EC_PUBLIC_KEY,
+            parameters: Some(const_oid::db::rfc5912::SECP_256_R_1),
+        };
+}
+
+impl<'a> x509_cert::spki::SignatureAlgorithmIdentifier for CsrSigner<'a> {
+    type Params = x509_cert::der::asn1::Null;
+
+    const SIGNATURE_ALGORITHM_IDENTIFIER: x509_cert::spki::AlgorithmIdentifier<Self::Params> =
+        x509_cert::spki::AlgorithmIdentifier {
+            oid: const_oid::db::rfc5912::ECDSA_WITH_SHA_256,
+            parameters: None,
+        };
+}
+
 /// An asynchronous Sigstore signing session.
 ///
 /// Sessions hold a provided user identity and key materials tied to that identity. A single
@@ -65,7 +144,7 @@ use crate::trust::sigstore::SigstoreTrustRoot;
 pub struct SigningSession<'ctx> {
     context: &'ctx SigningContext,
     identity_token: IdentityToken,
-    private_key: ecdsa::SigningKey<NistP256>,
+    private_key: EcdsaKeys<P256>,
     certs: fulcio::CertificateResponse,
 }
 
@@ -86,7 +165,7 @@ impl<'ctx> SigningSession<'ctx> {
     async fn materials(
         fulcio: &FulcioClient,
         token: &IdentityToken,
-    ) -> SigstoreResult<(ecdsa::SigningKey<NistP256>, fulcio::CertificateResponse)> {
+    ) -> SigstoreResult<(EcdsaKeys<P256>, fulcio::CertificateResponse)> {
         let subject =
                 // SEQUENCE OF RelativeDistinguishedName
                 vec![
@@ -96,22 +175,36 @@ impl<'ctx> SigningSession<'ctx> {
                         AttributeTypeAndValue {
                             oid: const_oid::db::rfc3280::EMAIL_ADDRESS,
                             value: AttributeValue::new(
-                                pkcs8::der::Tag::Utf8String,
+                                x509_cert::der::Tag::Utf8String,
                                 token.unverified_claims().email.as_ref(),
                             )?,
                         }
                     ].try_into()?
                 ].into();
 
-        let mut rng = rand::thread_rng();
-        let private_key = ecdsa::SigningKey::from(p256::SecretKey::random(&mut rng));
-        let mut builder = CertRequestBuilder::new(subject, &private_key)?;
+        let private_key = EcdsaKeys::<P256>::new()?;
+
+        // We need to build a CertRequestBuilder that can work with our key type
+        // Since CertRequestBuilder needs a SignatureAlgorithmIdentifier implementor,
+        // we'll need to get the pkcs8 bytes and build a temporary key for the CSR
+        let pkcs8_der = private_key.private_key_to_der()?;
+
+        // Parse the key using aws-lc-rs for CSR building
+        use aws_lc_rs::signature::EcdsaKeyPair;
+        let key_pair = EcdsaKeyPair::from_pkcs8(
+            &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
+            &pkcs8_der
+        ).map_err(|e| SigstoreError::PKCS8Error(format!("Failed to parse key for CSR: {}", e)))?;
+
+        // Build the CSR using a custom signer wrapper
+        let signer = CsrSigner::new(&key_pair);
+        let mut builder = CertRequestBuilder::new(subject, &signer)?;
         builder.add_extension(&x509_ext::BasicConstraints {
             ca: false,
             path_len_constraint: None,
         })?;
 
-        let cert_req = builder.build::<p256::ecdsa::DerSignature>()?;
+        let cert_req = builder.build::<P256Signature>()?;
         Ok((private_key, fulcio.request_cert_v2(cert_req, token).await?))
     }
 
@@ -145,8 +238,11 @@ impl<'ctx> SigningSession<'ctx> {
 
         // Sign artifact.
         let input_hash: &[u8] = &hasher.clone().finalize();
-        let artifact_signature: p256::ecdsa::Signature = self.private_key.sign_digest(hasher);
-        let signature_bytes = artifact_signature.to_der().as_bytes().to_owned();
+
+        // For aws-lc-rs, we sign the already-hashed data
+        // ECDSA signatures from aws-lc-rs are already in ASN.1 DER format
+        use crate::crypto::signing_key::Signer as _;
+        let signature_bytes = self.private_key.to_sigstore_signer()?.sign(input_hash)?;
 
         let cert = &self.certs.cert;
 

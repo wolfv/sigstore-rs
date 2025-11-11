@@ -119,6 +119,7 @@ openidconnect = { version = "4.0", default-features = false, features = [
     "reqwest-blocking",
 ], optional = true }
 pem = { version = "3.0", default-features = false, features = ["serde", "std"] }
+pkcs8 = { version = "0.10", default-features = false, features = ["std", "pem"] }
 pki-types = { package = "rustls-pki-types", version = "1.11", default-features = false }
 rand = { version = "0.8", default-features = false, features = [
     "getrandom",

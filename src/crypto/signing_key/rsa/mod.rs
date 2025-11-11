@@ -25,7 +25,7 @@
 //! * `Sha512`
 
 use aws_lc_rs::signature::{
-    RsaKeyPair, RsaSigningAlgorithm, RsaVerificationAlgorithm,
+    RsaKeyPair,
     RSA_PKCS1_SHA256, RSA_PKCS1_SHA384, RSA_PKCS1_SHA512,
     RSA_PSS_SHA256, RSA_PSS_SHA384, RSA_PSS_SHA512,
 };
@@ -164,33 +164,30 @@ impl RSASigner {
         iter_on_rsa!(RSASigner, self, key, key.to_verification_key(&signing_scheme))
     }
 
-    fn signing_algorithm(&self) -> &'static RsaSigningAlgorithm {
-        match self {
-            RSASigner::RSA_PSS_SHA256(_) => &RSA_PSS_SHA256,
-            RSASigner::RSA_PSS_SHA384(_) => &RSA_PSS_SHA384,
-            RSASigner::RSA_PSS_SHA512(_) => &RSA_PSS_SHA512,
-            RSASigner::RSA_PKCS1_SHA256(_) => &RSA_PKCS1_SHA256,
-            RSASigner::RSA_PKCS1_SHA384(_) => &RSA_PKCS1_SHA384,
-            RSASigner::RSA_PKCS1_SHA512(_) => &RSA_PKCS1_SHA512,
-        }
-    }
 }
 
 impl Signer for RSASigner {
     /// `sign` will sign the given data, and return the signature.
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>> {
         let rng = SystemRandom::new();
-        let algorithm = self.signing_algorithm();
         let key = self.rsa_keys();
 
         let key_pair = RsaKeyPair::from_pkcs8(key.pkcs8_der())
             .map_err(|e| SigstoreError::SigningError(format!("Failed to load RSA key: {}", e)))?;
 
         let mut signature = vec![0u8; key_pair.public().modulus_len()];
-        key_pair
-            .sign(algorithm, &rng, msg, &mut signature)
-            .map_err(|e| SigstoreError::SigningError(format!("RSA signing failed: {}", e)))?;
 
+        // Call the appropriate signing algorithm
+        let result = match self {
+            RSASigner::RSA_PSS_SHA256(_) => key_pair.sign(&RSA_PSS_SHA256, &rng, msg, &mut signature),
+            RSASigner::RSA_PSS_SHA384(_) => key_pair.sign(&RSA_PSS_SHA384, &rng, msg, &mut signature),
+            RSASigner::RSA_PSS_SHA512(_) => key_pair.sign(&RSA_PSS_SHA512, &rng, msg, &mut signature),
+            RSASigner::RSA_PKCS1_SHA256(_) => key_pair.sign(&RSA_PKCS1_SHA256, &rng, msg, &mut signature),
+            RSASigner::RSA_PKCS1_SHA384(_) => key_pair.sign(&RSA_PKCS1_SHA384, &rng, msg, &mut signature),
+            RSASigner::RSA_PKCS1_SHA512(_) => key_pair.sign(&RSA_PKCS1_SHA512, &rng, msg, &mut signature),
+        };
+
+        result.map_err(|e| SigstoreError::SigningError(format!("RSA signing failed: {}", e)))?;
         Ok(signature)
     }
 

@@ -17,7 +17,7 @@
 //! <https://github.com/sigstore/fulcio/blob/9da27be4fb64b85c907ab9ddd8a5d3cbd38041d4/fulcio.proto>
 
 use pem::Pem;
-use pkcs8::der::EncodePem;
+use x509_cert::der::EncodePem;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_repr::Deserialize_repr;
 use serde_with::{
@@ -36,7 +36,7 @@ where
     S: Serializer,
 {
     let encoded = input
-        .to_pem(pkcs8::LineEnding::LF)
+        .to_pem(pem::LineEnding::LF)
         .map_err(serde::ser::Error::custom)?;
 
     Base64::<Standard, Padded>::serialize_as(&encoded, ser)

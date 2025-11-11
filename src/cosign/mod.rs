@@ -46,7 +46,7 @@ use crate::registry::{Auth, PushResponse};
 
 use crate::crypto::{CosignVerificationKey, Signature};
 use crate::errors::SigstoreError;
-use pkcs8::der::Decode;
+use x509_cert::der::Decode;
 use x509_cert::Certificate;
 
 pub mod bundle;
