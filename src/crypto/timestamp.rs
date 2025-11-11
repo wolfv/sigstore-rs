@@ -527,9 +527,8 @@ fn verify_ecdsa_signature(
     message: &[u8],
     certificate: &Certificate,
 ) -> Result<(), TimestampError> {
-    use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
-    use p384::ecdsa::{Signature as P384Signature, VerifyingKey as P384VerifyingKey};
-    use signature::hazmat::PrehashVerifier;
+    #[cfg(not(target_arch = "powerpc64"))]
+    use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED, ECDSA_P384_SHA384_FIXED};
 
     // Get the public key from the certificate
     let spki = &certificate.tbs_certificate.subject_public_key_info;
@@ -557,101 +556,59 @@ fn verify_ecdsa_signature(
                 match curve_oid.to_string().as_str() {
                     "1.2.840.10045.3.1.7" => {
                         // secp256r1 (P-256)
-                        let verifying_key = P256VerifyingKey::from_sec1_bytes(public_key_bytes)
-                            .map_err(|e| {
+                        #[cfg(not(target_arch = "powerpc64"))]
+                        {
+                            // aws-lc-rs expects SPKI-encoded public key
+                            let spki_der = spki.to_der().map_err(|e| {
                                 TimestampError::SignatureVerificationError(format!(
-                                    "failed to parse P-256 public key: {}",
+                                    "failed to encode SPKI: {}",
                                     e
                                 ))
                             })?;
 
-                        // Try DER-encoded signature first
-                        let sig_result = P256Signature::from_der(signature);
-                        let sig = match sig_result {
-                            Ok(s) => s,
-                            Err(_) => {
-                                // If DER parsing fails, try raw signature bytes (64 bytes for P-256)
-                                tracing::debug!(
-                                    "DER signature parsing failed, trying raw signature format"
-                                );
-                                P256Signature::from_bytes(signature.into()).map_err(|e| {
-                                    TimestampError::SignatureVerificationError(format!(
-                                        "failed to parse P-256 signature (raw): {}",
-                                        e
-                                    ))
-                                })?
-                            }
-                        };
+                            let public_key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &spki_der);
 
-                        // Convert message (hash) to FieldBytes for P-256 (32 bytes)
-                        if message.len() != 32 {
-                            return Err(TimestampError::SignatureVerificationError(format!(
-                                "P-256 requires 32-byte hash, got {}",
-                                message.len()
-                            )));
+                            // Verify with message (prehashed)
+                            public_key.verify(message, signature).map_err(|_| {
+                                TimestampError::SignatureVerificationError(
+                                    "P-256 signature verification failed".to_string()
+                                )
+                            })?;
                         }
-                        let mut field_bytes = p256::FieldBytes::default();
-                        field_bytes.copy_from_slice(message);
-
-                        verifying_key
-                            .verify_prehash(&field_bytes, &sig)
-                            .map_err(|e| {
-                                TimestampError::SignatureVerificationError(format!(
-                                    "P-256 signature verification failed: {}",
-                                    e
-                                ))
-                            })?;
+                        #[cfg(target_arch = "powerpc64")]
+                        {
+                            return Err(TimestampError::SignatureVerificationError(
+                                "ECDSA verification not supported on powerpc64".to_string()
+                            ));
+                        }
                     }
                     "1.3.132.0.34" => {
                         // secp384r1 (P-384)
-                        let verifying_key = P384VerifyingKey::from_sec1_bytes(public_key_bytes)
-                            .map_err(|e| {
+                        #[cfg(not(target_arch = "powerpc64"))]
+                        {
+                            // aws-lc-rs expects SPKI-encoded public key
+                            let spki_der = spki.to_der().map_err(|e| {
                                 TimestampError::SignatureVerificationError(format!(
-                                    "failed to parse P-384 public key: {}",
+                                    "failed to encode SPKI: {}",
                                     e
                                 ))
                             })?;
 
-                        // Try DER-encoded signature first
-                        let sig_result = P384Signature::from_der(signature);
-                        let sig = match sig_result {
-                            Ok(s) => s,
-                            Err(_) => {
-                                // If DER parsing fails, try raw signature bytes (96 bytes for P-384)
-                                tracing::debug!(
-                                    "DER signature parsing failed, trying raw signature format"
-                                );
-                                P384Signature::from_bytes(signature.into()).map_err(|e| {
-                                    TimestampError::SignatureVerificationError(format!(
-                                        "failed to parse P-384 signature (raw): {}",
-                                        e
-                                    ))
-                                })?
-                            }
-                        };
+                            let public_key = UnparsedPublicKey::new(&ECDSA_P384_SHA384_FIXED, &spki_der);
 
-                        // Convert message (hash) to FieldBytes for P-384 (48 bytes for SHA-384, but can be 32 for SHA-256)
-                        // P-384 can verify hashes of different sizes, so we need to handle both SHA-256 (32) and SHA-384 (48)
-                        let mut field_bytes = p384::FieldBytes::default();
-                        if message.len() <= field_bytes.len() {
-                            // Pad with zeros on the left if needed (standard practice for shorter hashes)
-                            let offset = field_bytes.len() - message.len();
-                            field_bytes[offset..].copy_from_slice(message);
-                        } else {
-                            return Err(TimestampError::SignatureVerificationError(format!(
-                                "P-384 hash too long: {} bytes",
-                                message.len()
-                            )));
+                            // Verify with message (prehashed)
+                            public_key.verify(message, signature).map_err(|_| {
+                                TimestampError::SignatureVerificationError(
+                                    "P-384 signature verification failed".to_string()
+                                )
+                            })?;
                         }
-
-                        verifying_key
-                            .verify_prehash(&field_bytes, &sig)
-                            .map_err(|e| {
-                                TimestampError::SignatureVerificationError(format!(
-                                    "P-384 signature verification failed: {}",
-                                    e
-                                ))
-                            })?;
+                        #[cfg(target_arch = "powerpc64")]
+                        {
+                            return Err(TimestampError::SignatureVerificationError(
+                                "ECDSA verification not supported on powerpc64".to_string()
+                            ));
+                        }
                     }
                     _ => {
                         return Err(TimestampError::SignatureVerificationError(format!(
