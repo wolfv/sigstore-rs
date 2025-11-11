@@ -119,17 +119,16 @@ impl Ed25519Keys {
 
     /// Builds an `Ed25519Keys` from a pkcs8 DER-encoded private key.
     pub fn from_der(der_bytes: &[u8]) -> Result<Self> {
-        // Verify the key can be parsed
-        let _key_pair = Ed25519KeyPair::from_pkcs8(der_bytes)
+        // Parse the key to get the public key directly from aws-lc-rs
+        let key_pair = Ed25519KeyPair::from_pkcs8(der_bytes)
             .map_err(|e| SigstoreError::PKCS8Error(format!(
                 "Convert from pkcs8 der to ed25519 private key failed: {}", e
             )))?;
+        let public_key_bytes = key_pair.public_key().as_ref();
 
-        // Extract the SPKI-encoded public key from the PKCS#8 private key
+        // Extract algorithm info from PKCS#8
         let pkcs8_info = pkcs8::PrivateKeyInfo::from_der(der_bytes)
             .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to parse PKCS#8: {}", e)))?;
-        let public_key_bytes = pkcs8_info.public_key
-            .ok_or_else(|| SigstoreError::PKCS8Error("No public key in PKCS#8".to_string()))?;
 
         // Construct SPKI from algorithm and public key
         use x509_cert::der::referenced::OwnedToRef;
