@@ -178,7 +178,7 @@ impl<'ctx> SigningSession<'ctx> {
                             oid: const_oid::db::rfc3280::EMAIL_ADDRESS,
                             value: AttributeValue::new(
                                 x509_cert::der::Tag::Utf8String,
-                                token.unverified_claims().email.as_ref(),
+                                token.unverified_claims().email.as_ref().map(|s| s.as_bytes()).unwrap_or(b""),
                             )?,
                         }
                     ].try_into()?
