@@ -57,6 +57,7 @@ pub trait EcdsaCurve {
 }
 
 /// Marker type for P-256 curve
+#[derive(Debug, Clone, Copy)]
 pub struct P256;
 
 impl EcdsaCurve for P256 {
@@ -70,6 +71,7 @@ impl EcdsaCurve for P256 {
 }
 
 /// Marker type for P-384 curve
+#[derive(Debug, Clone, Copy)]
 pub struct P384;
 
 impl EcdsaCurve for P384 {
@@ -83,7 +85,7 @@ impl EcdsaCurve for P384 {
 }
 
 /// Generic ECDSA key pair using aws-lc-rs
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct EcdsaKeys<C: EcdsaCurve> {
     // Store the key in PKCS#8 DER format for serialization
     pkcs8_der: Zeroizing<Vec<u8>>,
@@ -92,12 +94,22 @@ pub struct EcdsaKeys<C: EcdsaCurve> {
     _marker: PhantomData<C>,
 }
 
+impl<C: EcdsaCurve> Clone for EcdsaKeys<C> {
+    fn clone(&self) -> Self {
+        Self {
+            pkcs8_der: self.pkcs8_der.clone(),
+            public_key_der: self.public_key_der.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<C: EcdsaCurve> EcdsaKeys<C> {
     /// Create a new `EcdsaKeys` Object with a randomly generated key pair
     pub fn new() -> Result<Self> {
         let rng = SystemRandom::new();
-        let pkcs8_der = EcdsaKeyPair::generate(C::signing_algorithm(), &rng)
-            .map_err(|e| SigstoreError::KeyGenerationError(format!("ECDSA key generation failed: {}", e)))?
+        let pkcs8_der = EcdsaKeyPair::generate_pkcs8(C::signing_algorithm(), &rng)
+            .map_err(|e| SigstoreError::PKCS8Error(format!("ECDSA key generation failed: {}", e)))?
             .as_ref()
             .to_vec();
 
@@ -199,13 +211,13 @@ impl EcdsaKeys<P384> {
 impl<C: EcdsaCurve> KeyPair for EcdsaKeys<C> {
     /// Return the public key in PEM-encoded SPKI format.
     fn public_key_to_pem(&self) -> Result<String> {
-        let pem = pem::Pem::new("PUBLIC KEY", &self.public_key_der);
+        let pem = pem::Pem::new("PUBLIC KEY", self.public_key_der.clone());
         Ok(pem::encode(&pem))
     }
 
     /// Return the private key in pkcs8 PEM-encoded format.
     fn private_key_to_pem(&self) -> Result<Zeroizing<String>> {
-        let pem = pem::Pem::new(PRIVATE_KEY_PEM_LABEL, &*self.pkcs8_der);
+        let pem = pem::Pem::new(PRIVATE_KEY_PEM_LABEL, self.pkcs8_der.to_vec());
         Ok(Zeroizing::new(pem::encode(&pem)))
     }
 
@@ -246,7 +258,7 @@ impl<C: EcdsaCurve, D> EcdsaSigner<C, D> {
     /// Create a new `EcdsaSigner` from the given `EcdsaKeys`
     pub fn from_ecdsa_keys(ecdsa_keys: &EcdsaKeys<C>) -> Result<Self> {
         Ok(Self {
-            ecdsa_keys: ecdsa_keys.clone(),
+            ecdsa_keys: (*ecdsa_keys).clone(),
             _digest_marker: PhantomData,
         })
     }
@@ -265,11 +277,11 @@ impl<C: EcdsaCurve, D> Signer for EcdsaSigner<C, D> {
             C::signing_algorithm(),
             &self.ecdsa_keys.pkcs8_der,
         )
-        .map_err(|e| SigstoreError::SigningError(format!("Failed to load key: {}", e)))?;
+        .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to load key: {}", e)))?;
 
         let signature = key_pair
             .sign(&rng, msg)
-            .map_err(|e| SigstoreError::SigningError(format!("Signing failed: {}", e)))?;
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Signing failed: {}", e)))?;
 
         Ok(signature.as_ref().to_vec())
     }

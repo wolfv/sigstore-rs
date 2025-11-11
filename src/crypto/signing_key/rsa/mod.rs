@@ -169,13 +169,14 @@ impl RSASigner {
 impl Signer for RSASigner {
     /// `sign` will sign the given data, and return the signature.
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>> {
+        use aws_lc_rs::signature::KeyPair as _;
         let rng = SystemRandom::new();
         let key = self.rsa_keys();
 
         let key_pair = RsaKeyPair::from_pkcs8(key.pkcs8_der())
-            .map_err(|e| SigstoreError::SigningError(format!("Failed to load RSA key: {}", e)))?;
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to load RSA key: {}", e)))?;
 
-        let mut signature = vec![0u8; key_pair.public().modulus_len()];
+        let mut signature = vec![0u8; key_pair.public_key().modulus_len()];
 
         // Call the appropriate signing algorithm
         let result = match self {
@@ -187,7 +188,7 @@ impl Signer for RSASigner {
             RSASigner::RSA_PKCS1_SHA512(_) => key_pair.sign(&RSA_PKCS1_SHA512, &rng, msg, &mut signature),
         };
 
-        result.map_err(|e| SigstoreError::SigningError(format!("RSA signing failed: {}", e)))?;
+        result.map_err(|e| SigstoreError::PKCS8Error(format!("RSA signing failed: {}", e)))?;
         Ok(signature)
     }
 

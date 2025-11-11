@@ -18,8 +18,9 @@
 //! This module provides RSA key pair generation and operations
 //! using the aws-lc-rs cryptographic library instead of RustCrypto.
 
-use aws_lc_rs::signature::RsaKeyPair;
-use aws_lc_rs::rand::SystemRandom;
+use aws_lc_rs::signature::{RsaKeyPair, KeyPair as AwsKeyPair};
+use aws_lc_rs::encoding::AsDer;
+use aws_lc_rs::rsa::KeySize;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -45,11 +46,21 @@ pub struct RSAKeys {
 impl RSAKeys {
     /// Create a new `RSAKeys` Object with a randomly generated key pair.
     pub fn new(bit_size: usize) -> Result<Self> {
-        let rng = SystemRandom::new();
-        let key_pair = RsaKeyPair::generate(bit_size)
-            .map_err(|e| SigstoreError::KeyGenerationError(format!("RSA key generation failed: {}", e)))?;
+        // Convert bit_size to KeySize
+        let key_size = match bit_size {
+            2048 => KeySize::Rsa2048,
+            3072 => KeySize::Rsa3072,
+            4096 => KeySize::Rsa4096,
+            8192 => KeySize::Rsa8192,
+            _ => return Err(SigstoreError::PKCS8Error(format!("Unsupported RSA key size: {}", bit_size))),
+        };
 
-        let pkcs8_der = key_pair.as_ref().to_vec();
+        let key_pair = RsaKeyPair::generate(key_size)
+            .map_err(|e| SigstoreError::PKCS8Error(format!("RSA key generation failed: {}", e)))?;
+        let pkcs8_der = key_pair.as_der()
+            .map_err(|e| SigstoreError::PKCS8Error(format!("Failed to serialize RSA key: {}", e)))?
+            .as_ref()
+            .to_vec();
 
         // Parse to get public key
         let key_pair = RsaKeyPair::from_pkcs8(&pkcs8_der)
@@ -139,7 +150,7 @@ impl RSAKeys {
 impl KeyPair for RSAKeys {
     /// Return the public key in PEM-encoded SPKI format.
     fn public_key_to_pem(&self) -> Result<String> {
-        let pem = pem::Pem::new("PUBLIC KEY", &self.public_key_der);
+        let pem = pem::Pem::new("PUBLIC KEY", self.public_key_der.clone());
         Ok(pem::encode(&pem))
     }
 
@@ -159,7 +170,7 @@ impl KeyPair for RSAKeys {
 
     /// Return the private key in pkcs8 PEM-encoded format.
     fn private_key_to_pem(&self) -> Result<Zeroizing<String>> {
-        let pem = pem::Pem::new(PRIVATE_KEY_PEM_LABEL, &*self.pkcs8_der);
+        let pem = pem::Pem::new(PRIVATE_KEY_PEM_LABEL, self.pkcs8_der.to_vec());
         Ok(Zeroizing::new(pem::encode(&pem)))
     }
 

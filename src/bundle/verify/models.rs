@@ -255,7 +255,7 @@ impl CheckedBundle {
     /// Retrieves and checks consistency of the bundle's [TransparencyLogEntry].
     pub fn tlog_entry(&self, offline: bool, input_digest: &[u8]) -> Option<&TransparencyLogEntry> {
         let base64_pem_certificate =
-            base64.encode(self.certificate.to_pem(pem::LineEnding::LF).ok()?);
+            base64.encode(self.certificate.to_pem(pkcs8::LineEnding::LF).ok()?);
 
         let expected_entry = rekor::Hashedrekord {
             kind: "hashedrekord".to_owned(),

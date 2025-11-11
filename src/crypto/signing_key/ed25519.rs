@@ -46,8 +46,8 @@ impl Ed25519Keys {
     /// Create a new `Ed25519Keys` Object with a randomly generated key pair
     pub fn new() -> Result<Self> {
         let rng = SystemRandom::new();
-        let pkcs8_der = Ed25519KeyPair::generate(&rng)
-            .map_err(|e| SigstoreError::KeyGenerationError(format!("Ed25519 key generation failed: {}", e)))?
+        let pkcs8_der = Ed25519KeyPair::generate_pkcs8(&rng)
+            .map_err(|e| SigstoreError::Ed25519PKCS8Error(format!("Ed25519 key generation failed: {}", e)))?
             .as_ref()
             .to_vec();
 
@@ -128,7 +128,7 @@ impl Ed25519Keys {
 impl KeyPair for Ed25519Keys {
     /// Return the public key in PEM-encoded SPKI format.
     fn public_key_to_pem(&self) -> Result<String> {
-        let pem = pem::Pem::new("PUBLIC KEY", &self.public_key);
+        let pem = pem::Pem::new("PUBLIC KEY", self.public_key.clone());
         Ok(pem::encode(&pem))
     }
 
@@ -148,7 +148,7 @@ impl KeyPair for Ed25519Keys {
 
     /// Return the private key in pkcs8 PEM-encoded format.
     fn private_key_to_pem(&self) -> Result<Zeroizing<String>> {
-        let pem = pem::Pem::new(PRIVATE_KEY_PEM_LABEL, &*self.pkcs8_der);
+        let pem = pem::Pem::new(PRIVATE_KEY_PEM_LABEL, self.pkcs8_der.to_vec());
         Ok(Zeroizing::new(pem::encode(&pem)))
     }
 
@@ -194,7 +194,7 @@ impl Signer for Ed25519Signer {
     /// Sign the given message using Ed25519
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>> {
         let key_pair = Ed25519KeyPair::from_pkcs8(&self.key_pair.pkcs8_der)
-            .map_err(|e| SigstoreError::SigningError(format!("Failed to load key: {}", e)))?;
+            .map_err(|e| SigstoreError::Ed25519PKCS8Error(format!("Failed to load key: {}", e)))?;
 
         let signature = key_pair.sign(msg);
         Ok(signature.as_ref().to_vec())

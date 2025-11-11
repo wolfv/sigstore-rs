@@ -64,8 +64,9 @@ struct P256PublicKey {
 
 impl pkcs8::EncodePublicKey for P256PublicKey {
     fn to_public_key_der(&self) -> pkcs8::spki::Result<pkcs8::Document> {
+        use x509_cert::der::Decode;
         // The bytes are already in the correct SubjectPublicKeyInfo DER format
-        pkcs8::Document::from_der(&self.bytes)
+        pkcs8::Document::from_der(&self.bytes).map_err(|e| pkcs8::spki::Error::KeyMalformed)
     }
 }
 
@@ -86,6 +87,7 @@ struct CsrSigner<'a> {
 
 impl<'a> CsrSigner<'a> {
     fn new(key_pair: &'a aws_lc_rs::signature::EcdsaKeyPair) -> Self {
+        use aws_lc_rs::signature::KeyPair;
         Self {
             public_key: P256PublicKey {
                 bytes: key_pair.public_key().as_ref().to_vec(),
